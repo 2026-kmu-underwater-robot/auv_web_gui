@@ -6,18 +6,23 @@ from pathlib import Path
 import uvicorn
 from ament_index_python.packages import get_package_share_directory
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi import Request
+from fastapi import Response
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from kmu26_auv_web_gui.ekf_config import read_process_noise_covariance
+from kmu26_auv_web_gui.ekf_config import write_process_noise_covariance
 from kmu26_auv_web_gui.process_manager import ProcessManager
 from kmu26_auv_web_gui.ros_interface import RosInterface
 
 
 DEFAULT_BAG_TOPICS = [
     "/joy",
+    "/battery",
     "/dvl/data",
     "/dvl/twist",
     "/depth/pose",
@@ -27,6 +32,22 @@ DEFAULT_BAG_TOPICS = [
     "/tf",
     "/tf_static",
 ]
+
+ALLOWED_DVL_COMMANDS = {
+    "calibrate_gyro",
+    "get_config",
+    "reset_dead_reckoning",
+    "set_config",
+}
+
+ALLOWED_DVL_PARAMETERS = {
+    "",
+    "acoustic_enabled",
+    "dark_mode_enabled",
+    "mountig_rotation_offset",
+    "range_mode",
+    "speed_of_sound",
+}
 
 
 def create_app(robot_package: str, robot_launch: str) -> FastAPI:
@@ -55,6 +76,10 @@ def create_app(robot_package: str, robot_launch: str) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(web_dir / "index.html")
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon() -> Response:
+        return Response(status_code=204)
+
     @app.get("/api/status")
     def status() -> dict:
         return _status(process_manager, ros_interface)
@@ -70,10 +95,22 @@ def create_app(robot_package: str, robot_launch: str) -> FastAPI:
         process_manager.stop_stack()
         return _status(process_manager, ros_interface)
 
-    @app.post("/api/dvl/setup")
-    async def run_dvl_setup(request: Request) -> dict:
+    @app.post("/api/dvl/command")
+    async def run_dvl_command(request: Request) -> dict:
         body = await _json_or_empty(request)
-        process_manager.run_dvl_setup(body.get("topic", "/dvl/config/command"))
+        command = str(body.get("command", ""))
+        parameter_name = str(body.get("parameter_name", ""))
+        parameter_value = str(body.get("parameter_value", ""))
+        if command not in ALLOWED_DVL_COMMANDS:
+            raise HTTPException(status_code=400, detail=f"unsupported DVL command: {command}")
+        if parameter_name not in ALLOWED_DVL_PARAMETERS:
+            raise HTTPException(status_code=400, detail=f"unsupported DVL parameter: {parameter_name}")
+        if command != "set_config" and (parameter_name or parameter_value):
+            raise HTTPException(status_code=400, detail=f"{command} does not accept a parameter")
+        if command == "set_config" and not parameter_name:
+            raise HTTPException(status_code=400, detail="set_config requires a parameter_name")
+
+        ros_interface.publish_dvl_command(command, parameter_name, parameter_value)
         return _status(process_manager, ros_interface)
 
     @app.post("/api/dvl/reset_dr")
@@ -81,11 +118,24 @@ def create_app(robot_package: str, robot_launch: str) -> FastAPI:
         ros_interface.reset_dvl_dead_reckoning()
         return _status(process_manager, ros_interface)
 
+    @app.get("/api/ekf/process_noise")
+    def get_process_noise() -> dict:
+        return read_process_noise_covariance()
+
+    @app.post("/api/ekf/process_noise")
+    async def set_process_noise(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        try:
+            return write_process_noise_covariance(body.get("values", []))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/bag/start")
     async def start_bag(request: Request) -> dict:
         body = await _json_or_empty(request)
+        record_all = bool(body.get("record_all", False))
         topics = body.get("topics") or DEFAULT_BAG_TOPICS
-        output_dir = process_manager.start_bag(topics)
+        output_dir = process_manager.start_bag(topics, record_all=record_all)
         payload = _status(process_manager, ros_interface)
         payload["bag_output"] = output_dir
         return payload
@@ -94,6 +144,19 @@ def create_app(robot_package: str, robot_launch: str) -> FastAPI:
     def stop_bag() -> dict:
         process_manager.stop_bag()
         return _status(process_manager, ros_interface)
+
+    @app.get("/api/bag/topics")
+    def bag_topics() -> dict:
+        try:
+            active_topics = process_manager.list_topics()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        topics = sorted(set(DEFAULT_BAG_TOPICS) | set(active_topics))
+        return {
+            "default_topics": DEFAULT_BAG_TOPICS,
+            "active_topics": active_topics,
+            "topics": topics,
+        }
 
     @app.websocket("/ws/status")
     async def status_ws(websocket: WebSocket) -> None:

@@ -28,7 +28,7 @@ setup(
         (f"share/{package_name}/scripts", glob("scripts/*.sh")),
         *data_files_for("web"),
     ],
-    install_requires=["setuptools", "fastapi", "uvicorn"],
+    install_requires=["setuptools", "fastapi", "uvicorn", "websockets", "PyYAML"],
     zip_safe=True,
     maintainer="kuuve",
     maintainer_email="kuuve@todo.todo",

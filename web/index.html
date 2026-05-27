@@ -17,18 +17,22 @@
           <span id="stack-pill" class="pill">STACK</span>
           <span id="bag-pill" class="pill">BAG</span>
           <span id="joy-pill" class="pill">JOY</span>
+          <span id="battery-pill" class="pill">BAT</span>
         </div>
       </header>
 
       <section class="controls">
         <button id="start-stack" class="primary">Start Robot Stack</button>
         <button id="stop-stack">Stop Robot Stack</button>
-        <button id="dvl-setup">Run DVL Setup</button>
-        <button id="dvl-reset">Reset DVL DR</button>
-        <button id="start-bag">Start Bag</button>
-        <button id="stop-bag">Stop Bag</button>
       </section>
 
+      <section class="tabs" role="tablist">
+        <button id="dashboard-tab-button" class="tab-button active" data-tab="dashboard" role="tab">Dashboard</button>
+        <button id="bag-tab-button" class="tab-button" data-tab="bag" role="tab">Rosbag</button>
+        <button id="ekf-tab-button" class="tab-button" data-tab="ekf" role="tab">EKF Params</button>
+      </section>
+
+      <section id="dashboard-tab" class="tab-view active">
       <section class="grid">
         <article class="panel telemetry">
           <h2>Telemetry</h2>
@@ -49,12 +53,79 @@
               <dt>Depth Z</dt>
               <dd id="depth-value">0.00 m</dd>
             </div>
+            <div>
+              <dt>Battery Voltage</dt>
+              <dd id="battery-voltage">--</dd>
+            </div>
+            <div>
+              <dt>Battery Current</dt>
+              <dd id="battery-current">--</dd>
+            </div>
+            <div>
+              <dt>Battery SOC</dt>
+              <dd id="battery-soc">--</dd>
+            </div>
+            <div>
+              <dt>Battery Temp</dt>
+              <dd id="battery-temp">--</dd>
+            </div>
           </dl>
         </article>
 
         <article class="panel topics">
           <h2>Topic Health</h2>
           <div id="topic-list" class="topic-list"></div>
+        </article>
+
+        <article class="panel dvl-panel">
+          <h2>DVL Commands</h2>
+          <div class="dvl-command-grid">
+            <button data-dvl-command="get_config">Get Config</button>
+            <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="true">Acoustic On</button>
+            <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="false">Acoustic Off</button>
+            <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="true">Dark On</button>
+            <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="false">Dark Off</button>
+            <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="auto">Range Auto</button>
+            <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="=1">Range 1</button>
+            <button data-dvl-command="calibrate_gyro">Calibrate Gyro</button>
+            <button data-dvl-command="reset_dead_reckoning" class="danger">Reset DR</button>
+          </div>
+          <dl class="dvl-config">
+            <div>
+              <dt>Updated</dt>
+              <dd id="dvl-updated">--</dd>
+            </div>
+            <div>
+              <dt>Range</dt>
+              <dd id="dvl-range">--</dd>
+            </div>
+            <div>
+              <dt>Acoustic</dt>
+              <dd id="dvl-acoustic">--</dd>
+            </div>
+            <div>
+              <dt>Dark</dt>
+              <dd id="dvl-dark">--</dd>
+            </div>
+            <div>
+              <dt>Sound</dt>
+              <dd id="dvl-sound">--</dd>
+            </div>
+            <div>
+              <dt>Rotation</dt>
+              <dd id="dvl-rotation">--</dd>
+            </div>
+            <div>
+              <dt>Last</dt>
+              <dd id="dvl-last">--</dd>
+            </div>
+            <div>
+              <dt>Error</dt>
+              <dd id="dvl-error">--</dd>
+            </div>
+          </dl>
+          <pre id="dvl-config-json">--</pre>
+          <pre id="dvl-events"></pre>
         </article>
 
         <article class="panel path-panel">
@@ -79,6 +150,60 @@
         <article class="panel logs">
           <h2>Logs</h2>
           <pre id="log-output"></pre>
+        </article>
+      </section>
+      </section>
+
+      <section id="bag-tab" class="tab-view">
+        <article class="panel bag-panel">
+          <div class="panel-header">
+            <h2>Rosbag Recording</h2>
+            <div class="panel-actions">
+              <button id="start-bag" class="primary">Start Bag</button>
+              <button id="stop-bag">Stop Bag</button>
+              <button id="bag-refresh-topics">Refresh Topics</button>
+            </div>
+          </div>
+          <div class="bag-mode">
+            <label>
+              <input type="radio" name="bag-mode" value="all" />
+              <span>All Topics</span>
+            </label>
+            <label>
+              <input type="radio" name="bag-mode" value="selected" checked />
+              <span>Selected Topics</span>
+            </label>
+          </div>
+          <dl class="bag-status">
+            <div>
+              <dt>Status</dt>
+              <dd id="bag-state">--</dd>
+            </div>
+            <div>
+              <dt>Output</dt>
+              <dd id="bag-output">--</dd>
+            </div>
+          </dl>
+          <div id="bag-topic-list" class="bag-topic-list"></div>
+          <pre id="bag-log-output"></pre>
+        </article>
+      </section>
+
+      <section id="ekf-tab" class="tab-view">
+        <article class="panel ekf-panel">
+          <div class="panel-header">
+            <h2>EKF Process Noise</h2>
+            <div class="panel-actions">
+              <button id="ekf-reload">Reload</button>
+              <button id="ekf-save" class="primary">Save</button>
+            </div>
+          </div>
+          <div class="ekf-meta">
+            <span id="ekf-path">--</span>
+            <span id="ekf-save-state">Idle</span>
+          </div>
+          <div id="ekf-diagonal" class="ekf-diagonal"></div>
+          <div id="ekf-matrix" class="ekf-matrix"></div>
         </article>
       </section>
     </main>

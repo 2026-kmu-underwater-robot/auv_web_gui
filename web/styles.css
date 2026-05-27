@@ -49,6 +49,11 @@ button.primary {
   border-color: #2a8e65;
 }
 
+button.danger {
+  background: #5d1c26;
+  border-color: #9d3343;
+}
+
 .app {
   width: min(1440px, calc(100% - 32px));
   margin: 0 auto;
@@ -115,9 +120,32 @@ h2 {
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   padding: 18px 0;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 14px;
+}
+
+.tab-button {
+  min-width: 128px;
+}
+
+.tab-button.active {
+  background: #244837;
+  border-color: #52d273;
+}
+
+.tab-view {
+  display: none;
+}
+
+.tab-view.active {
+  display: block;
 }
 
 .grid {
@@ -140,15 +168,27 @@ h2 {
   margin: 14px 0 0;
 }
 
+.telemetry dl > div {
+  min-height: 70px;
+  border: 1px solid color-mix(in srgb, var(--border), white 8%);
+  border-radius: 6px;
+  padding: 11px 12px;
+  background: #141b18;
+}
+
 .telemetry dt {
-  color: var(--muted);
-  font-size: 12px;
+  color: #c3d0c9;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .telemetry dd {
-  margin: 4px 0 0;
-  font-size: 20px;
-  font-weight: 700;
+  margin: 6px 0 0;
+  color: #ffffff;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
 }
 
 .topic-list {
@@ -184,6 +224,201 @@ h2 {
 
 .topic.stale {
   border-color: color-mix(in srgb, var(--bad), transparent 45%);
+}
+
+.dvl-command-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.dvl-config {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.dvl-config div {
+  min-height: 58px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  background: #141b18;
+}
+
+.dvl-config dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dvl-config dd {
+  margin: 6px 0 0;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.bag-status {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.bag-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.bag-mode label,
+.bag-topic-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #141b18;
+}
+
+.bag-mode label {
+  min-height: 42px;
+  padding: 0 12px;
+  font-weight: 750;
+}
+
+.bag-status div {
+  min-height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  background: #141b18;
+}
+
+.bag-status dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bag-status dd {
+  margin: 6px 0 0;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+#bag-log-output {
+  max-height: 420px;
+}
+
+.bag-topic-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.bag-topic-list label {
+  min-height: 40px;
+  padding: 8px 10px;
+  color: #dce8e1;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+#dvl-config-json,
+#dvl-events {
+  max-height: 170px;
+}
+
+.panel-header,
+.panel-actions,
+.ekf-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.panel-header {
+  justify-content: space-between;
+}
+
+.panel-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.ekf-meta {
+  justify-content: space-between;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ekf-diagonal {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.ekf-diagonal label {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px;
+  background: #141b18;
+  color: #c3d0c9;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ekf-diagonal input,
+.ekf-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #0e1311;
+  color: var(--text);
+  font: inherit;
+}
+
+.ekf-diagonal input {
+  min-height: 34px;
+  padding: 0 8px;
+  font-weight: 750;
+}
+
+.ekf-matrix {
+  display: grid;
+  grid-template-columns: 72px repeat(15, 88px);
+  gap: 4px;
+  overflow-x: auto;
+  margin-top: 14px;
+  padding-bottom: 8px;
+}
+
+.ekf-cell {
+  min-height: 34px;
+}
+
+.ekf-heading {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #1e2823;
+  color: #c3d0c9;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ekf-input {
+  padding: 0 6px;
+  font-size: 12px;
 }
 
 .path-panel {
@@ -227,11 +462,19 @@ pre {
 
 @media (max-width: 980px) {
   .controls {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .grid {
     grid-template-columns: 1fr;
+  }
+
+  .dvl-command-grid,
+  .dvl-config,
+  .bag-status,
+  .bag-topic-list,
+  .ekf-diagonal {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -248,6 +491,11 @@ pre {
 
   .status-pills,
   .controls,
+  .dvl-command-grid,
+  .dvl-config,
+  .bag-status,
+  .bag-topic-list,
+  .ekf-diagonal,
   .telemetry dl,
   .topic-list,
   .joy-readout {

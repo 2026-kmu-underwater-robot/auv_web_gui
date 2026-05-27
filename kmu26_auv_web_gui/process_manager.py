@@ -1,11 +1,19 @@
 import os
 import signal
 import subprocess
+import sys
 import threading
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+
+
+def subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("RCUTILS_LOGGING_BUFFERED_STREAM", "0")
+    return env
 
 
 class ManagedProcess:
@@ -25,6 +33,7 @@ class ManagedProcess:
             self.cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=subprocess_env(),
             text=True,
             bufsize=1,
             start_new_session=True,
@@ -55,13 +64,14 @@ class ManagedProcess:
             return
         for line in self.process.stdout:
             self._log(f"[{self.name}] {line.rstrip()}")
-        return_code = self.process.poll()
+        return_code = self.process.wait()
         self._log(f"[{self.name}] exited with code {return_code}")
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_buffer.append(f"{timestamp} {message}")
-
+        entry = f"{timestamp} {message}"
+        self.log_buffer.append(entry)
+        print(entry, file=sys.stdout, flush=True)
 
 class ProcessManager:
     def __init__(
@@ -74,6 +84,7 @@ class ProcessManager:
         self.logs: deque[str] = deque(maxlen=500)
         self._stack: ManagedProcess | None = None
         self._bag: ManagedProcess | None = None
+        self._bag_output: str = ""
 
     def start_stack(self, launch_args: dict[str, str] | None = None) -> None:
         args = launch_args or {}
@@ -82,22 +93,18 @@ class ProcessManager:
             if value != "":
                 cmd.append(f"{key}:={value}")
 
-        self._stack = ManagedProcess("stack", cmd, self.logs)
+        self._stack = ManagedProcess("localization_test", cmd, self.logs)
         self._stack.start()
 
     def stop_stack(self) -> None:
         if self._stack:
             self._stack.stop()
 
-    def run_dvl_setup(self, topic: str = "/dvl/config/command") -> None:
-        cmd = ["ros2", "run", self.robot_package, "dvl_setup.sh", topic]
-        proc = ManagedProcess("dvl_setup", cmd, self.logs)
-        proc.start()
-
     def start_bag(
         self,
-        topics: Iterable[str],
+        topics: Iterable[str] | None = None,
         output_root: str = "~/auv_localization_bags",
+        record_all: bool = False,
     ) -> str:
         if self._bag and self._bag.is_running:
             raise RuntimeError("bag recording is already running")
@@ -105,11 +112,30 @@ class ProcessManager:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = Path(output_root).expanduser() / f"localization_{timestamp}"
         output_dir.parent.mkdir(parents=True, exist_ok=True)
-        topic_list = [topic for topic in topics if topic]
-        cmd = ["ros2", "bag", "record", "-o", str(output_dir), *topic_list]
+        topic_list = [topic for topic in (topics or []) if topic]
+        if record_all:
+            cmd = ["ros2", "bag", "record", "-o", str(output_dir), "-a"]
+        else:
+            if not topic_list:
+                raise RuntimeError("at least one topic must be selected")
+            cmd = ["ros2", "bag", "record", "-o", str(output_dir), *topic_list]
         self._bag = ManagedProcess("bag", cmd, self.logs)
+        self._bag_output = str(output_dir)
         self._bag.start()
         return str(output_dir)
+
+    def list_topics(self) -> list[str]:
+        result = subprocess.run(
+            ["ros2", "topic", "list"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=subprocess_env(),
+            text=True,
+            timeout=3.0,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "failed to list ROS topics")
+        return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
 
     def stop_bag(self) -> None:
         if self._bag:
@@ -119,6 +145,7 @@ class ProcessManager:
         return {
             "stack_running": bool(self._stack and self._stack.is_running),
             "bag_running": bool(self._bag and self._bag.is_running),
+            "bag_output": self._bag_output,
             "logs": list(self.logs)[-80:],
         }
 
