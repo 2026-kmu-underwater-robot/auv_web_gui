@@ -38,6 +38,7 @@ setup(
     entry_points={
         "console_scripts": [
             "server = kmu26_auv_web_gui.server:main",
+            "dronecan_dynamic_id_allocator = kmu26_auv_web_gui.dronecan_dynamic_id_allocator:main",
         ],
     },
 )

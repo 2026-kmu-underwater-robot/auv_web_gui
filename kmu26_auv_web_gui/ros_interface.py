@@ -13,10 +13,12 @@ from geometry_msgs.msg import TwistWithCovarianceStamped
 from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool
 from mavros_msgs.srv import SetMode
+from robot_localization.srv import SetPose
 from rclpy.executors import ExternalShutdownException
 from rclpy.executors import SingleThreadedExecutor
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import BatteryState
 from sensor_msgs.msg import Imu
 from sensor_msgs.msg import Joy
@@ -31,6 +33,16 @@ def _yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _quaternion_from_yaw(yaw: float) -> dict[str, float]:
+    half_yaw = yaw * 0.5
+    return {
+        "x": 0.0,
+        "y": 0.0,
+        "z": math.sin(half_yaw),
+        "w": math.cos(half_yaw),
+    }
 
 
 def _finite_or_none(value: float) -> float | None:
@@ -116,22 +128,25 @@ class LocalizationRosNode(Node):
             "neutral_burst": 0,
         }
 
+        sensor_qos = qos_profile_sensor_data
+
         self._dvl_config_pub = self.create_publisher(
             ConfigCommand,
             "/dvl/config/command",
-            10,
+            sensor_qos,
         )
         self._web_joy_pub = self.create_publisher(Joy, "/joy", 10)
         self._arm_client = self.create_client(CommandBool, "/mavros/cmd/arming")
         self._set_mode_client = self.create_client(SetMode, "/mavros/set_mode")
-        self.create_subscription(Odometry, "/odometry/filtered", self._on_odom, 20)
-        self.create_subscription(TwistWithCovarianceStamped, "/dvl/twist", self._on_dvl, 20)
-        self.create_subscription(CommandResponse, "/dvl/command/response", self._on_dvl_response, 20)
-        self.create_subscription(ConfigStatus, "/dvl/config/status", self._on_dvl_config, 20)
-        self.create_subscription(PoseWithCovarianceStamped, "/depth/pose", self._on_depth, 20)
-        self.create_subscription(BatteryState, "/battery", self._on_battery, 20)
+        self._set_pose_client = self.create_client(SetPose, "/set_pose")
+        self.create_subscription(Odometry, "/odometry/filtered", self._on_odom, sensor_qos)
+        self.create_subscription(TwistWithCovarianceStamped, "/dvl/twist", self._on_dvl, sensor_qos)
+        self.create_subscription(CommandResponse, "/dvl/command/response", self._on_dvl_response, sensor_qos)
+        self.create_subscription(ConfigStatus, "/dvl/config/status", self._on_dvl_config, sensor_qos)
+        self.create_subscription(PoseWithCovarianceStamped, "/depth/pose", self._on_depth, sensor_qos)
+        self.create_subscription(BatteryState, "/battery", self._on_battery, sensor_qos)
         self.create_subscription(State, "/mavros/state", self._on_mavros_state, 20)
-        self.create_subscription(Imu, "/mavros/imu/data", self._on_imu, 20)
+        self.create_subscription(Imu, "/mavros/imu/data", self._on_imu, sensor_qos)
         self.create_subscription(Joy, "/joy", self._on_joy, 20)
         self.create_timer(WEB_CONTROL_PERIOD_S, self._publish_web_control)
 
@@ -178,6 +193,80 @@ class LocalizationRosNode(Node):
     def clear_path(self) -> None:
         with self._lock:
             self._path.clear()
+
+    def wait_for_odom_after(self, timestamp: float, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                odom_seen = self._health["odom"].last_seen
+            if odom_seen is not None and odom_seen >= timestamp:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def set_localization_origin(self) -> dict:
+        now = time.monotonic()
+        with self._lock:
+            odom_seen = self._health["odom"].last_seen
+            if odom_seen is None or now - odom_seen > 2.0:
+                raise RuntimeError("odometry is not alive; cannot set localization origin")
+            pose = dict(self._pose)
+
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "odom"
+        msg.pose.pose.position.x = 0.0
+        msg.pose.pose.position.y = 0.0
+        msg.pose.pose.position.z = float(pose["z"])
+        orientation = _quaternion_from_yaw(float(pose["yaw"]))
+        msg.pose.pose.orientation.x = orientation["x"]
+        msg.pose.pose.orientation.y = orientation["y"]
+        msg.pose.pose.orientation.z = orientation["z"]
+        msg.pose.pose.orientation.w = orientation["w"]
+        msg.pose.covariance[0] = 0.01
+        msg.pose.covariance[7] = 0.01
+        msg.pose.covariance[14] = 0.01
+        msg.pose.covariance[21] = 0.01
+        msg.pose.covariance[28] = 0.01
+        msg.pose.covariance[35] = 0.01
+        if not self._set_pose_client.wait_for_service(timeout_sec=0.5):
+            raise RuntimeError("robot_localization set_pose service is not available")
+
+        request = SetPose.Request()
+        request.pose = msg
+        future = self._set_pose_client.call_async(request)
+        deadline = time.monotonic() + 1.0
+        while not future.done():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("robot_localization set_pose service timed out")
+            time.sleep(0.02)
+        if future.exception() is not None:
+            raise RuntimeError(f"robot_localization set_pose failed: {future.exception()}")
+
+        with self._lock:
+            self._pose = {
+                "x": 0.0,
+                "y": 0.0,
+                "z": pose["z"],
+                "yaw": pose["yaw"],
+            }
+            self._path.clear()
+        self.get_logger().info(
+            "Set localization origin: "
+            f"previous x={pose['x']:.3f} "
+            f"y={pose['y']:.3f} "
+            f"z={pose['z']:.3f} "
+            f"yaw={pose['yaw']:.3f}"
+        )
+        return {
+            "previous_pose": pose,
+            "new_pose": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": pose["z"],
+                "yaw": pose["yaw"],
+            },
+        }
 
     def set_web_control_enabled(self, enabled: bool) -> None:
         with self._lock:
@@ -455,6 +544,16 @@ class RosInterface:
         if self.node is None:
             raise RuntimeError("ROS interface is not running")
         self.node.clear_path()
+
+    def set_localization_origin(self) -> dict:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.set_localization_origin()
+
+    def wait_for_odom_after(self, timestamp: float, timeout: float = 5.0) -> bool:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.wait_for_odom_after(timestamp, timeout)
 
     def set_web_control_enabled(self, enabled: bool) -> None:
         if self.node is None:

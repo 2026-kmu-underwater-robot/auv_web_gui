@@ -8,6 +8,8 @@ const state = {
   },
   bag: {
     topicsLoaded: false,
+    loading: false,
+    error: "",
     defaultTopics: [],
     topics: [],
   },
@@ -500,14 +502,37 @@ function renderBag(process) {
 }
 
 async function loadBagTopics() {
-  const payload = await getJson("/api/bag/topics");
-  state.bag.defaultTopics = payload.default_topics || [];
-  state.bag.topics = payload.topics || [];
-  state.bag.topicsLoaded = true;
+  state.bag.loading = true;
+  state.bag.error = "";
   renderBagTopics();
+  try {
+    const payload = await getJson("/api/bag/topics");
+    state.bag.defaultTopics = payload.default_topics || [];
+    state.bag.topics = payload.topics || [];
+    state.bag.topicsLoaded = true;
+  } catch (error) {
+    state.bag.error = error.message;
+    throw error;
+  } finally {
+    state.bag.loading = false;
+    renderBagTopics();
+  }
 }
 
 function renderBagTopics() {
+  if (state.bag.loading) {
+    $("bag-topic-list").innerHTML = `<div class="bag-topic-message">Loading topics...</div>`;
+    return;
+  }
+  if (state.bag.error) {
+    $("bag-topic-list").innerHTML = `<div class="bag-topic-message bad">${state.bag.error}</div>`;
+    return;
+  }
+  if (state.bag.topics.length === 0) {
+    $("bag-topic-list").innerHTML = `<div class="bag-topic-message">No topics discovered.</div>`;
+    return;
+  }
+
   const defaults = new Set(state.bag.defaultTopics);
   $("bag-topic-list").innerHTML = state.bag.topics
     .map((topic) => {
@@ -705,6 +730,9 @@ function bindPathControls() {
     state.path.points = [];
     renderPath();
     postJson("/api/path/clear").catch(showError);
+  });
+  $("path-set-origin").addEventListener("click", () => {
+    postJson("/api/localization/set_origin").then(renderStatus).catch(showError);
   });
 
   window.addEventListener("resize", renderPath);

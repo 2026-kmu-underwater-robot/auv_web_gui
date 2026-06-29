@@ -17,6 +17,13 @@ def subprocess_env() -> dict[str, str]:
     return env
 
 
+def _default_dronecan_python() -> str:
+    candidate = os.path.expanduser("~/miniconda3/envs/auv_ros2/bin/python")
+    if os.path.exists(candidate):
+        return candidate
+    return sys.executable
+
+
 class ManagedProcess:
     def __init__(self, name: str, cmd: list[str], log_buffer: deque[str]):
         self.name = name
@@ -97,19 +104,53 @@ class ProcessManager:
         self,
         robot_package: str = "hit25_auv_ros2",
         robot_launch: str = "localization_test.launch.py",
+        start_dronecan_allocator: bool = True,
+        dronecan_can_interface: str = "can0",
+        dronecan_allocator_node_id: int = 126,
+        dronecan_allocator_db: str = "",
+        dronecan_python: str = "",
     ):
         self.robot_package = robot_package
         self.robot_launch = robot_launch
+        self.start_dronecan_allocator_on_startup = start_dronecan_allocator
+        self.dronecan_can_interface = dronecan_can_interface
+        self.dronecan_allocator_node_id = dronecan_allocator_node_id
+        self.dronecan_allocator_db = dronecan_allocator_db
+        self.dronecan_python = dronecan_python or _default_dronecan_python()
         self.logs: deque[str] = deque(maxlen=500)
+        self._dronecan_allocator: ManagedProcess | None = None
         self._stack: ManagedProcess | None = None
         self._bag: ManagedProcess | None = None
         self._bag_output: str = ""
+
+    def start_dronecan_allocator(self) -> None:
+        if not self.start_dronecan_allocator_on_startup:
+            return
+        if self.dronecan_allocator_running:
+            return
+
+        cmd = [
+            self.dronecan_python,
+            "-m",
+            "kmu26_auv_web_gui.dronecan_dynamic_id_allocator",
+            "--can-interface",
+            self.dronecan_can_interface,
+            "--node-id",
+            str(self.dronecan_allocator_node_id),
+        ]
+        if self.dronecan_allocator_db:
+            cmd.extend(["--database-storage", self.dronecan_allocator_db])
+        self._dronecan_allocator = ManagedProcess("dronecan_allocator", cmd, self.logs)
+        self._dronecan_allocator.start()
 
     def start_stack(self, launch_args: dict[str, str] | None = None) -> None:
         if self.stack_running:
             raise RuntimeError("robot stack is already running")
 
-        args = launch_args or {}
+        args = dict(launch_args or {})
+        if self._uses_external_dronecan_allocator():
+            args.setdefault("enable_battery_dynamic_id_server", "false")
+
         cmd = ["ros2", "launch", self.robot_package, self.robot_launch]
         for key, value in args.items():
             if value != "":
@@ -122,6 +163,58 @@ class ProcessManager:
         if self._stack:
             self._stack.stop()
         self._stop_orphaned_stack_groups()
+
+    def restart_localization_filter(self) -> dict:
+        groups = self._stack_process_groups()
+        if not groups:
+            raise RuntimeError("robot stack is not running")
+
+        old_pids = _matching_process_pids(
+            groups,
+            executable="ekf_node",
+            marker="robot_localization",
+        )
+        if not old_pids:
+            raise RuntimeError("robot_localization ekf_node is not running")
+
+        self._log(
+            "[localization_test] restarting robot_localization ekf_node "
+            f"(pid {', '.join(str(pid) for pid in old_pids)})"
+        )
+        for pid in old_pids:
+            _signal_process(pid, signal.SIGTERM)
+
+        if not _wait_for_pids_to_exit(
+            old_pids,
+            executable="ekf_node",
+            marker="robot_localization",
+            timeout=3.0,
+        ):
+            self._log("[localization_test] force killing ekf_node")
+            for pid in old_pids:
+                _signal_process(pid, signal.SIGKILL)
+            _wait_for_pids_to_exit(
+                old_pids,
+                executable="ekf_node",
+                marker="robot_localization",
+                timeout=2.0,
+            )
+
+        new_pids = _wait_for_new_matching_pids(
+            groups,
+            old_pids,
+            executable="ekf_node",
+            marker="robot_localization",
+            timeout=5.0,
+        )
+        if not new_pids:
+            raise RuntimeError("robot_localization ekf_node did not respawn")
+
+        self._log(
+            "[localization_test] robot_localization ekf_node respawned "
+            f"(pid {', '.join(str(pid) for pid in new_pids)})"
+        )
+        return {"old_pids": old_pids, "new_pids": new_pids}
 
     def start_bag(
         self,
@@ -166,6 +259,8 @@ class ProcessManager:
 
     def status(self) -> dict:
         return {
+            "dronecan_allocator_enabled": self.start_dronecan_allocator_on_startup,
+            "dronecan_allocator_running": self.dronecan_allocator_running,
             "stack_running": self.stack_running,
             "bag_running": bool(self._bag and self._bag.is_running),
             "bag_output": self._bag_output,
@@ -175,15 +270,35 @@ class ProcessManager:
     def stop_all(self) -> None:
         self.stop_bag()
         self.stop_stack()
+        self.stop_dronecan_allocator()
 
     @property
     def stack_running(self) -> bool:
-        return bool(self._stack and self._stack.is_running) or bool(
-            _matching_launch_process_groups(self.robot_package, self.robot_launch)
-        )
+        return bool(self._stack and self._stack.is_running) or bool(self._stack_process_groups())
+
+    @property
+    def dronecan_allocator_running(self) -> bool:
+        return bool(self._dronecan_allocator and self._dronecan_allocator.is_running)
+
+    def stop_dronecan_allocator(self) -> None:
+        if self._dronecan_allocator:
+            self._dronecan_allocator.stop()
+
+    def _uses_external_dronecan_allocator(self) -> bool:
+        if not self.dronecan_allocator_running:
+            return False
+        if self.robot_package != "hit25_auv_ros2":
+            return False
+        return self.robot_launch in {"localization_test.launch.py", "rov_start.launch.py"}
+
+    def _stack_process_groups(self) -> set[int]:
+        groups = _matching_launch_process_groups(self.robot_package, self.robot_launch)
+        if self._stack and self._stack.pgid is not None and self._stack.is_running:
+            groups.add(self._stack.pgid)
+        return groups
 
     def _stop_orphaned_stack_groups(self) -> None:
-        groups = _matching_launch_process_groups(self.robot_package, self.robot_launch)
+        groups = self._stack_process_groups()
         for pgid in sorted(groups):
             self._log(f"[localization_test] stopping orphaned process group {pgid}")
             _kill_process_group(pgid, signal.SIGTERM)
@@ -250,6 +365,13 @@ def _kill_process_group(pgid: int, sig: signal.Signals) -> None:
         return
 
 
+def _signal_process(pid: int, sig: signal.Signals) -> None:
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        return
+
+
 def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -257,6 +379,70 @@ def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
             return True
         time.sleep(0.1)
     return not _process_group_has_live_members(pgid)
+
+
+def _wait_for_pids_to_exit(
+    pids: Iterable[int],
+    executable: str,
+    marker: str,
+    timeout: float,
+) -> bool:
+    pid_set = set(pids)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _matching_pids_still_live(pid_set, executable, marker):
+            return True
+        time.sleep(0.1)
+    return not _matching_pids_still_live(pid_set, executable, marker)
+
+
+def _wait_for_new_matching_pids(
+    groups: set[int],
+    old_pids: Iterable[int],
+    executable: str,
+    marker: str,
+    timeout: float,
+) -> list[int]:
+    old_pid_set = set(old_pids)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pids = [
+            pid for pid in _matching_process_pids(groups, executable, marker)
+            if pid not in old_pid_set
+        ]
+        if pids:
+            return pids
+        time.sleep(0.1)
+    return []
+
+
+def _matching_pids_still_live(pids: set[int], executable: str, marker: str) -> bool:
+    for pid, cmdline in _iter_process_cmdlines():
+        if pid not in pids or not cmdline:
+            continue
+        if os.path.basename(cmdline[0]) != executable:
+            continue
+        if marker and not any(marker in part for part in cmdline):
+            continue
+        return True
+    return False
+
+
+def _matching_process_pids(groups: set[int], executable: str, marker: str) -> list[int]:
+    pids: list[int] = []
+    for pid, cmdline in _iter_process_cmdlines():
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            continue
+        if pgid not in groups:
+            continue
+        if not cmdline or os.path.basename(cmdline[0]) != executable:
+            continue
+        if marker and not any(marker in part for part in cmdline):
+            continue
+        pids.append(pid)
+    return sorted(pids)
 
 
 def _process_group_has_live_members(pgid: int) -> bool:

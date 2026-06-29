@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import time
 from pathlib import Path
 
 import uvicorn
@@ -59,9 +60,25 @@ ALLOWED_CONTROL_MODES = {
 }
 
 
-def create_app(robot_package: str, robot_launch: str) -> FastAPI:
+def create_app(
+    robot_package: str,
+    robot_launch: str,
+    start_dronecan_allocator: bool = True,
+    dronecan_can_interface: str = "can0",
+    dronecan_allocator_node_id: int = 126,
+    dronecan_allocator_db: str = "",
+    dronecan_python: str = "",
+) -> FastAPI:
     app = FastAPI(title="AUV Localization Test GUI")
-    process_manager = ProcessManager(robot_package=robot_package, robot_launch=robot_launch)
+    process_manager = ProcessManager(
+        robot_package=robot_package,
+        robot_launch=robot_launch,
+        start_dronecan_allocator=start_dronecan_allocator,
+        dronecan_can_interface=dronecan_can_interface,
+        dronecan_allocator_node_id=dronecan_allocator_node_id,
+        dronecan_allocator_db=dronecan_allocator_db,
+        dronecan_python=dronecan_python,
+    )
     ros_interface = RosInterface()
     web_dir_override = os.environ.get("KMU26_WEB_GUI_WEB_DIR")
     if web_dir_override:
@@ -70,10 +87,11 @@ def create_app(robot_package: str, robot_launch: str) -> FastAPI:
         package_share = Path(get_package_share_directory("kmu26_auv_web_gui"))
         web_dir = package_share / "web"
 
-    app.mount("/static", StaticFiles(directory=web_dir), name="static")
+    app.mount("/static", StaticFiles(directory=web_dir, follow_symlink=True), name="static")
 
     @app.on_event("startup")
     def on_startup() -> None:
+        process_manager.start_dronecan_allocator()
         ros_interface.start()
 
     @app.on_event("shutdown")
@@ -131,6 +149,29 @@ def create_app(robot_package: str, robot_launch: str) -> FastAPI:
     def clear_path() -> dict:
         ros_interface.clear_path()
         return _status(process_manager, ros_interface)
+
+    @app.post("/api/localization/set_origin")
+    def set_localization_origin() -> dict:
+        previous_pose = ros_interface.status().get("pose", {})
+        set_pose = None
+        try:
+            restart = process_manager.restart_localization_filter()
+            fresh_since = time.monotonic()
+            odom_refreshed = ros_interface.wait_for_odom_after(fresh_since, timeout=5.0)
+            if odom_refreshed:
+                set_pose = ros_interface.set_localization_origin()
+            ros_interface.clear_path()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = _status(process_manager, ros_interface)
+        payload["origin"] = {
+            "method": "restart_robot_localization_then_set_pose",
+            "previous_pose": previous_pose,
+            "restart": restart,
+            "set_pose": set_pose,
+            "odom_refreshed": odom_refreshed,
+        }
+        return payload
 
     @app.post("/api/control/enable")
     async def set_control_enabled(request: Request) -> dict:
@@ -239,10 +280,29 @@ def main() -> None:
     parser.add_argument("--port", default=8080, type=int)
     parser.add_argument("--robot-package", default="hit25_auv_ros2")
     parser.add_argument("--robot-launch", default="localization_test.launch.py")
-    args = parser.parse_args()
+    parser.add_argument("--start-dronecan-allocator", default="true")
+    parser.add_argument("--dronecan-can-interface", default="can0")
+    parser.add_argument("--dronecan-allocator-node-id", default=126, type=int)
+    parser.add_argument("--dronecan-allocator-db", default="")
+    parser.add_argument("--dronecan-python", default="")
+    args, _ = parser.parse_known_args()
 
-    app = create_app(robot_package=args.robot_package, robot_launch=args.robot_launch)
+    app = create_app(
+        robot_package=args.robot_package,
+        robot_launch=args.robot_launch,
+        start_dronecan_allocator=_parse_bool(args.start_dronecan_allocator),
+        dronecan_can_interface=args.dronecan_can_interface,
+        dronecan_allocator_node_id=args.dronecan_allocator_node_id,
+        dronecan_allocator_db=args.dronecan_allocator_db,
+        dronecan_python=args.dronecan_python,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
+
+
+def _parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 if __name__ == "__main__":
