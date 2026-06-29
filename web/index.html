@@ -15,6 +15,7 @@
         </div>
         <div class="status-pills">
           <span id="stack-pill" class="pill">STACK</span>
+          <span id="mavros-pill" class="pill">MAV</span>
           <span id="bag-pill" class="pill">BAG</span>
           <span id="joy-pill" class="pill">JOY</span>
           <span id="battery-pill" class="pill">BAT</span>
@@ -28,12 +29,14 @@
 
       <section class="tabs" role="tablist">
         <button id="dashboard-tab-button" class="tab-button active" data-tab="dashboard" role="tab">Dashboard</button>
+        <button id="state-tab-button" class="tab-button" data-tab="state" role="tab">State</button>
+        <button id="control-tab-button" class="tab-button" data-tab="control" role="tab">Control</button>
         <button id="bag-tab-button" class="tab-button" data-tab="bag" role="tab">Rosbag</button>
         <button id="ekf-tab-button" class="tab-button" data-tab="ekf" role="tab">EKF Params</button>
       </section>
 
       <section id="dashboard-tab" class="tab-view active">
-      <section class="grid">
+      <section class="grid dashboard-grid">
         <article class="panel telemetry">
           <h2>Telemetry</h2>
           <dl>
@@ -54,6 +57,22 @@
               <dd id="depth-value">0.00 m</dd>
             </div>
             <div>
+              <dt>MAVROS Connected</dt>
+              <dd id="mavros-connected">--</dd>
+            </div>
+            <div>
+              <dt>Arming</dt>
+              <dd id="mavros-armed">--</dd>
+            </div>
+            <div>
+              <dt>Flight Mode</dt>
+              <dd id="mavros-mode">--</dd>
+            </div>
+            <div>
+              <dt>Control</dt>
+              <dd id="mavros-control">--</dd>
+            </div>
+            <div>
               <dt>Battery Voltage</dt>
               <dd id="battery-voltage">--</dd>
             </div>
@@ -72,79 +91,56 @@
           </dl>
         </article>
 
-        <article class="panel topics">
-          <h2>Topic Health</h2>
-          <div id="topic-list" class="topic-list"></div>
-        </article>
-
-        <article class="panel dvl-panel">
-          <h2>DVL Commands</h2>
-          <div class="dvl-command-grid">
-            <button data-dvl-command="get_config">Get Config</button>
-            <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="true">Acoustic On</button>
-            <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="false">Acoustic Off</button>
-            <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="true">Dark On</button>
-            <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="false">Dark Off</button>
-            <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="auto">Range Auto</button>
-            <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="=1">Range 1</button>
-            <button data-dvl-command="calibrate_gyro">Calibrate Gyro</button>
-            <button data-dvl-command="reset_dead_reckoning" class="danger">Reset DR</button>
-          </div>
-          <dl class="dvl-config">
-            <div>
-              <dt>Updated</dt>
-              <dd id="dvl-updated">--</dd>
-            </div>
-            <div>
-              <dt>Range</dt>
-              <dd id="dvl-range">--</dd>
-            </div>
-            <div>
-              <dt>Acoustic</dt>
-              <dd id="dvl-acoustic">--</dd>
-            </div>
-            <div>
-              <dt>Dark</dt>
-              <dd id="dvl-dark">--</dd>
-            </div>
-            <div>
-              <dt>Sound</dt>
-              <dd id="dvl-sound">--</dd>
-            </div>
-            <div>
-              <dt>Rotation</dt>
-              <dd id="dvl-rotation">--</dd>
-            </div>
-            <div>
-              <dt>Last</dt>
-              <dd id="dvl-last">--</dd>
-            </div>
-            <div>
-              <dt>Error</dt>
-              <dd id="dvl-error">--</dd>
-            </div>
-          </dl>
-          <pre id="dvl-config-json">--</pre>
-          <pre id="dvl-events"></pre>
-        </article>
-
         <article class="panel path-panel">
-          <h2>Path</h2>
-          <canvas id="path-canvas" width="640" height="360"></canvas>
-        </article>
-
-        <article class="panel joy-panel">
-          <h2>Joy</h2>
-          <div class="joy-readout">
-            <div>
-              <strong>Axes</strong>
-              <pre id="joy-axes">[]</pre>
-            </div>
-            <div>
-              <strong>Buttons</strong>
-              <pre id="joy-buttons">[]</pre>
+          <div class="panel-header">
+            <h2>Path</h2>
+            <div class="path-meta">
+              <span id="path-point-count">0 points</span>
+              <span id="path-view-state">--</span>
             </div>
           </div>
+          <div class="path-controls">
+            <label>
+              <span>View</span>
+              <select id="path-view-mode">
+                <option value="fit">Fit</option>
+                <option value="map">Map</option>
+                <option value="follow">Follow</option>
+              </select>
+            </label>
+            <label>
+              <span>Color</span>
+              <input id="path-color" type="color" value="#6ec6ff" />
+            </label>
+            <label>
+              <span>Width</span>
+              <input id="path-width" type="range" min="1" max="12" step="0.5" value="2.5" />
+              <strong id="path-width-value">2.5 px</strong>
+            </label>
+            <label>
+              <span>Scale</span>
+              <input id="path-scale" type="range" min="5" max="200" step="1" value="40" />
+              <strong id="path-scale-value">40 px/m</strong>
+            </label>
+            <label>
+              <span>Step</span>
+              <input id="path-grid-step" type="number" min="0.1" max="20" step="0.1" value="1" />
+            </label>
+            <label class="path-toggle">
+              <input id="path-show-grid" type="checkbox" checked />
+              <span>Grid</span>
+            </label>
+            <label class="path-toggle">
+              <input id="path-show-axes" type="checkbox" checked />
+              <span>Axes</span>
+            </label>
+            <label class="path-toggle">
+              <input id="path-show-robot" type="checkbox" checked />
+              <span>Robot</span>
+            </label>
+            <button id="path-clear" class="danger">Clear Path</button>
+          </div>
+          <canvas id="path-canvas" width="640" height="360"></canvas>
         </article>
 
         <article class="panel logs">
@@ -152,6 +148,215 @@
           <pre id="log-output"></pre>
         </article>
       </section>
+      </section>
+
+      <section id="state-tab" class="tab-view">
+        <section class="grid state-grid">
+          <article class="panel topics">
+            <h2>Topic Health</h2>
+            <div id="topic-list" class="topic-list"></div>
+          </article>
+
+          <article class="panel dvl-panel">
+            <h2>DVL Commands</h2>
+            <div class="dvl-command-grid">
+              <button data-dvl-command="get_config">Get Config</button>
+              <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="true">Acoustic On</button>
+              <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="false">Acoustic Off</button>
+              <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="true">Dark On</button>
+              <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="false">Dark Off</button>
+              <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="auto">Range Auto</button>
+              <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="=1">Range 1</button>
+              <button data-dvl-command="calibrate_gyro">Calibrate Gyro</button>
+              <button data-dvl-command="reset_dead_reckoning" class="danger">Reset DR</button>
+            </div>
+            <dl class="dvl-config">
+              <div>
+                <dt>Updated</dt>
+                <dd id="dvl-updated">--</dd>
+              </div>
+              <div>
+                <dt>Range</dt>
+                <dd id="dvl-range">--</dd>
+              </div>
+              <div>
+                <dt>Acoustic</dt>
+                <dd id="dvl-acoustic">--</dd>
+              </div>
+              <div>
+                <dt>Dark</dt>
+                <dd id="dvl-dark">--</dd>
+              </div>
+              <div>
+                <dt>Sound</dt>
+                <dd id="dvl-sound">--</dd>
+              </div>
+              <div>
+                <dt>Rotation</dt>
+                <dd id="dvl-rotation">--</dd>
+              </div>
+              <div>
+                <dt>Last</dt>
+                <dd id="dvl-last">--</dd>
+              </div>
+              <div>
+                <dt>Error</dt>
+                <dd id="dvl-error">--</dd>
+              </div>
+            </dl>
+            <pre id="dvl-config-json">--</pre>
+            <pre id="dvl-events"></pre>
+          </article>
+
+          <article class="panel joy-panel">
+            <h2>Joy</h2>
+            <div class="ps4-pad" aria-label="Joystick state">
+              <div class="ps4-controller">
+                <div class="ps4-shoulders">
+                  <div class="trigger-group">
+                    <div id="joy-btn-l2" class="trigger-meter ps4-trigger" aria-label="L2">
+                      <span id="joy-lt-fill"></span>
+                      <strong>L2</strong>
+                    </div>
+                    <span id="joy-btn-l1" class="ps4-button">L1</span>
+                  </div>
+                  <div class="trigger-group">
+                    <div id="joy-btn-r2" class="trigger-meter ps4-trigger" aria-label="R2">
+                      <span id="joy-rt-fill"></span>
+                      <strong>R2</strong>
+                    </div>
+                    <span id="joy-btn-r1" class="ps4-button">R1</span>
+                  </div>
+                </div>
+
+                <div class="ps4-body">
+                  <section class="pad-left">
+                    <div class="dpad-cluster">
+                      <div class="dpad">
+                        <span id="joy-dpad-up" class="dpad-button dpad-up">▲</span>
+                        <span id="joy-dpad-left" class="dpad-button dpad-left">◀</span>
+                        <span class="dpad-center"></span>
+                        <span id="joy-dpad-right" class="dpad-button dpad-right">▶</span>
+                        <span id="joy-dpad-down" class="dpad-button dpad-down">▼</span>
+                      </div>
+                    </div>
+                    <div class="stick-shell">
+                      <div class="stick">
+                        <span id="joy-left-stick-dot" class="stick-dot"></span>
+                        <strong>L3</strong>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="pad-center">
+                    <div class="touchpad-row">
+                      <span id="joy-btn-share" class="ps4-side-button">SHARE</span>
+                      <span id="joy-btn-touchpad" class="ps4-touchpad" aria-label="Touchpad">
+                        <span class="touchpad-texture"></span>
+                      </span>
+                      <span id="joy-btn-options" class="ps4-side-button">OPTIONS</span>
+                    </div>
+                    <div class="ps4-speaker" aria-hidden="true">
+                      <span></span><span></span><span></span><span></span><span></span>
+                      <span></span><span></span><span></span><span></span><span></span>
+                      <span></span><span></span>
+                    </div>
+                    <div class="center-buttons">
+                      <span id="joy-btn-ps" class="ps4-guide-button">PS</span>
+                    </div>
+                    <div class="stick-buttons">
+                      <span id="joy-btn-l3" class="ps4-mini-button">L3</span>
+                      <span id="joy-btn-r3" class="ps4-mini-button">R3</span>
+                    </div>
+                    <p id="joy-gamepad-state">No Joy data</p>
+                    <span class="ps4-port" aria-hidden="true"></span>
+                  </section>
+
+                  <section class="pad-right">
+                    <div class="face-cluster">
+                      <div class="face-buttons">
+                        <span id="joy-btn-triangle" class="face-button face-triangle">△</span>
+                        <span id="joy-btn-square" class="face-button face-square">□</span>
+                        <span id="joy-btn-circle" class="face-button face-circle">○</span>
+                        <span id="joy-btn-cross" class="face-button face-cross">×</span>
+                      </div>
+                    </div>
+                    <div class="stick-shell">
+                      <div class="stick">
+                        <span id="joy-right-stick-dot" class="stick-dot"></span>
+                        <strong>R3</strong>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </article>
+        </section>
+      </section>
+
+      <section id="control-tab" class="tab-view">
+        <article class="panel control-panel">
+          <div class="panel-header">
+            <h2>Web Control</h2>
+            <div class="control-status">
+              <span id="control-state" class="pill">WEB OFF</span>
+              <span id="control-publish-state">--</span>
+            </div>
+          </div>
+
+          <div class="control-layout">
+            <section class="control-drive">
+              <div class="control-enable-row">
+                <label class="control-enable">
+                  <input id="control-enable" type="checkbox" />
+                  <span>Enable Web Control</span>
+                </label>
+                <button id="control-deadman" class="primary">Hold to Drive</button>
+                <button id="control-stop" class="danger">Stop</button>
+              </div>
+
+              <div class="control-sliders">
+                <label>
+                  <span>Forward</span>
+                  <input id="control-forward" type="range" min="-1" max="1" step="0.05" value="0" />
+                  <strong id="control-forward-value">0.00</strong>
+                </label>
+                <label>
+                  <span>Lateral</span>
+                  <input id="control-lateral" type="range" min="-1" max="1" step="0.05" value="0" />
+                  <strong id="control-lateral-value">0.00</strong>
+                </label>
+                <label>
+                  <span>Vertical</span>
+                  <input id="control-vertical" type="range" min="-1" max="1" step="0.05" value="0" />
+                  <strong id="control-vertical-value">0.00</strong>
+                </label>
+                <label>
+                  <span>Yaw</span>
+                  <input id="control-yaw" type="range" min="-1" max="1" step="0.05" value="0" />
+                  <strong id="control-yaw-value">0.00</strong>
+                </label>
+              </div>
+            </section>
+
+            <section class="control-actions">
+              <h2>Vehicle</h2>
+              <div class="control-command-grid">
+                <button id="control-arm" class="danger">Arm</button>
+                <button id="control-disarm">Disarm</button>
+              </div>
+              <h2>Mode</h2>
+              <div class="control-command-grid">
+                <button data-control-mode="MANUAL">MANUAL</button>
+                <button data-control-mode="STABILIZE">STABILIZE</button>
+                <button data-control-mode="ALT_HOLD">ALT HOLD</button>
+                <button data-control-mode="POSHOLD">POSHOLD</button>
+                <button data-control-mode="GUIDED">GUIDED</button>
+              </div>
+            </section>
+          </div>
+        </article>
       </section>
 
       <section id="bag-tab" class="tab-view">

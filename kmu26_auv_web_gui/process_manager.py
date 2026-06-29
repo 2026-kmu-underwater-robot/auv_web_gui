@@ -3,6 +3,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ class ManagedProcess:
         self.cmd = cmd
         self.log_buffer = log_buffer
         self.process: subprocess.Popen[str] | None = None
+        self.pgid: int | None = None
         self._reader_thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -38,21 +40,37 @@ class ManagedProcess:
             bufsize=1,
             start_new_session=True,
         )
+        self.pgid = os.getpgid(self.process.pid)
         self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
         self._reader_thread.start()
 
     def stop(self) -> None:
-        if self.process is None or self.process.poll() is not None:
+        if self.process is None and self.pgid is None:
             return
 
         self._log(f"[{self.name}] stopping")
+        pgid = self.pgid
+        if pgid is None and self.process is not None:
+            try:
+                pgid = os.getpgid(self.process.pid)
+            except ProcessLookupError:
+                return
+
         try:
-            os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-            self.process.wait(timeout=5.0)
+            _kill_process_group(pgid, signal.SIGTERM)
+            if self.process is not None and self.process.poll() is None:
+                self.process.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             self._log(f"[{self.name}] force killing")
-            os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-            self.process.wait(timeout=2.0)
+            _kill_process_group(pgid, signal.SIGKILL)
+            if self.process is not None:
+                self.process.wait(timeout=2.0)
+            return
+
+        if not _wait_for_process_group_exit(pgid, timeout=2.0):
+            self._log(f"[{self.name}] force killing remaining process group {pgid}")
+            _kill_process_group(pgid, signal.SIGKILL)
+            _wait_for_process_group_exit(pgid, timeout=2.0)
 
     @property
     def is_running(self) -> bool:
@@ -73,6 +91,7 @@ class ManagedProcess:
         self.log_buffer.append(entry)
         print(entry, file=sys.stdout, flush=True)
 
+
 class ProcessManager:
     def __init__(
         self,
@@ -87,6 +106,9 @@ class ProcessManager:
         self._bag_output: str = ""
 
     def start_stack(self, launch_args: dict[str, str] | None = None) -> None:
+        if self.stack_running:
+            raise RuntimeError("robot stack is already running")
+
         args = launch_args or {}
         cmd = ["ros2", "launch", self.robot_package, self.robot_launch]
         for key, value in args.items():
@@ -99,6 +121,7 @@ class ProcessManager:
     def stop_stack(self) -> None:
         if self._stack:
             self._stack.stop()
+        self._stop_orphaned_stack_groups()
 
     def start_bag(
         self,
@@ -143,7 +166,7 @@ class ProcessManager:
 
     def status(self) -> dict:
         return {
-            "stack_running": bool(self._stack and self._stack.is_running),
+            "stack_running": self.stack_running,
             "bag_running": bool(self._bag and self._bag.is_running),
             "bag_output": self._bag_output,
             "logs": list(self.logs)[-80:],
@@ -152,3 +175,105 @@ class ProcessManager:
     def stop_all(self) -> None:
         self.stop_bag()
         self.stop_stack()
+
+    @property
+    def stack_running(self) -> bool:
+        return bool(self._stack and self._stack.is_running) or bool(
+            _matching_launch_process_groups(self.robot_package, self.robot_launch)
+        )
+
+    def _stop_orphaned_stack_groups(self) -> None:
+        groups = _matching_launch_process_groups(self.robot_package, self.robot_launch)
+        for pgid in sorted(groups):
+            self._log(f"[localization_test] stopping orphaned process group {pgid}")
+            _kill_process_group(pgid, signal.SIGTERM)
+        for pgid in sorted(groups):
+            if _wait_for_process_group_exit(pgid, timeout=5.0):
+                continue
+            self._log(f"[localization_test] force killing orphaned process group {pgid}")
+            _kill_process_group(pgid, signal.SIGKILL)
+            _wait_for_process_group_exit(pgid, timeout=2.0)
+
+    def _log(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"{timestamp} {message}"
+        self.logs.append(entry)
+        print(entry, file=sys.stdout, flush=True)
+
+
+def _matching_launch_process_groups(robot_package: str, robot_launch: str) -> set[int]:
+    groups: set[int] = set()
+    current_pid = os.getpid()
+    for pid, cmdline in _iter_process_cmdlines():
+        if pid == current_pid or not _is_matching_ros2_launch(cmdline, robot_package, robot_launch):
+            continue
+        try:
+            groups.add(os.getpgid(pid))
+        except ProcessLookupError:
+            continue
+    return groups
+
+
+def _is_matching_ros2_launch(
+    cmdline: list[str],
+    robot_package: str,
+    robot_launch: str,
+) -> bool:
+    for index, arg in enumerate(cmdline[:-3]):
+        if os.path.basename(arg) != "ros2":
+            continue
+        if cmdline[index + 1 : index + 4] == ["launch", robot_package, robot_launch]:
+            return True
+    return False
+
+
+def _iter_process_cmdlines() -> Iterable[tuple[int, list[str]]]:
+    proc = Path("/proc")
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if not raw:
+            continue
+        cmdline = [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+        if cmdline:
+            yield int(entry.name), cmdline
+
+
+def _kill_process_group(pgid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        return
+
+
+def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_group_has_live_members(pgid):
+            return True
+        time.sleep(0.1)
+    return not _process_group_has_live_members(pgid)
+
+
+def _process_group_has_live_members(pgid: int) -> bool:
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            pid = int(entry.name)
+            if os.getpgid(pid) != pgid:
+                continue
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        parts = stat.rsplit(")", 1)
+        if len(parts) != 2:
+            continue
+        fields = parts[1].strip().split()
+        if fields and fields[0] != "Z":
+            return True
+    return False

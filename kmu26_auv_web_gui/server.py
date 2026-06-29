@@ -27,6 +27,7 @@ DEFAULT_BAG_TOPICS = [
     "/dvl/twist",
     "/depth/pose",
     "/mavros/imu/data",
+    "/mavros/state",
     "/odometry/filtered",
     "/localization/path",
     "/tf",
@@ -47,6 +48,14 @@ ALLOWED_DVL_PARAMETERS = {
     "mountig_rotation_offset",
     "range_mode",
     "speed_of_sound",
+}
+
+ALLOWED_CONTROL_MODES = {
+    "MANUAL",
+    "STABILIZE",
+    "ALT_HOLD",
+    "POSHOLD",
+    "GUIDED",
 }
 
 
@@ -117,6 +126,45 @@ def create_app(robot_package: str, robot_launch: str) -> FastAPI:
     def reset_dvl() -> dict:
         ros_interface.reset_dvl_dead_reckoning()
         return _status(process_manager, ros_interface)
+
+    @app.post("/api/path/clear")
+    def clear_path() -> dict:
+        ros_interface.clear_path()
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/control/enable")
+    async def set_control_enabled(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        ros_interface.set_web_control_enabled(bool(body.get("enabled", False)))
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/control/command")
+    async def set_control_command(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        axes = body.get("axes", {})
+        if not isinstance(axes, dict):
+            raise HTTPException(status_code=400, detail="axes must be an object")
+        ros_interface.update_web_control_command(axes, bool(body.get("active", False)))
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/control/arm")
+    async def set_control_arm(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        accepted = ros_interface.set_armed(bool(body.get("armed", False)))
+        payload = _status(process_manager, ros_interface)
+        payload["accepted"] = accepted
+        return payload
+
+    @app.post("/api/control/mode")
+    async def set_control_mode(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        mode = str(body.get("mode", ""))
+        if mode not in ALLOWED_CONTROL_MODES:
+            raise HTTPException(status_code=400, detail=f"unsupported mode: {mode}")
+        accepted = ros_interface.set_mode(mode)
+        payload = _status(process_manager, ros_interface)
+        payload["accepted"] = accepted
+        return payload
 
     @app.get("/api/ekf/process_noise")
     def get_process_noise() -> dict:

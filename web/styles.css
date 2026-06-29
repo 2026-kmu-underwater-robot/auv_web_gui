@@ -21,6 +21,7 @@ body {
   min-width: 320px;
   background: var(--bg);
   color: var(--text);
+  font-size: 14px;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -54,6 +55,11 @@ button.danger {
   border-color: #9d3343;
 }
 
+button.active {
+  background: #7b5621;
+  border-color: var(--warn);
+}
+
 .app {
   width: min(1440px, calc(100% - 32px));
   margin: 0 auto;
@@ -76,12 +82,12 @@ p {
 }
 
 h1 {
-  font-size: 26px;
+  font-size: 22px;
   line-height: 1.2;
 }
 
 h2 {
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.2;
 }
 
@@ -104,7 +110,7 @@ h2 {
   padding: 7px 10px;
   color: var(--muted);
   text-align: center;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 750;
 }
 
@@ -116,6 +122,11 @@ h2 {
 .pill.warn {
   border-color: color-mix(in srgb, var(--warn), transparent 35%);
   color: var(--warn);
+}
+
+.pill.bad {
+  border-color: color-mix(in srgb, var(--bad), transparent 35%);
+  color: var(--bad);
 }
 
 .controls {
@@ -150,8 +161,21 @@ h2 {
 
 .grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 14px;
+}
+
+.dashboard-grid {
+  grid-template-columns: 1fr 1fr;
+  grid-template-areas:
+    "telemetry path"
+    "logs path";
+}
+
+.state-grid {
+  grid-template-columns: 0.8fr 1.2fr;
+  grid-template-areas:
+    "topics joy"
+    "dvl joy";
 }
 
 .panel {
@@ -159,6 +183,27 @@ h2 {
   border-radius: 8px;
   background: var(--surface);
   padding: 16px;
+}
+
+.telemetry {
+  grid-area: telemetry;
+}
+
+.topics {
+  grid-area: topics;
+  align-self: start;
+}
+
+.dvl-panel {
+  grid-area: dvl;
+}
+
+.path-panel {
+  grid-area: path;
+}
+
+.joy-panel {
+  grid-area: joy;
 }
 
 .telemetry dl {
@@ -178,44 +223,67 @@ h2 {
 
 .telemetry dt {
   color: #c3d0c9;
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 700;
 }
 
 .telemetry dd {
   margin: 6px 0 0;
   color: #ffffff;
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 800;
   line-height: 1.15;
   overflow-wrap: anywhere;
 }
 
+.telemetry dd.state-good {
+  color: var(--good);
+}
+
+.telemetry dd.state-warn {
+  color: var(--warn);
+}
+
+.telemetry dd.state-bad {
+  color: var(--bad);
+}
+
 .topic-list {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-top: 14px;
+  grid-template-rows: repeat(2, minmax(38px, auto));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(120px, 1fr);
+  gap: 6px;
+  max-height: none;
+  overflow: visible;
+  margin-top: 10px;
 }
 
 .topic {
-  min-height: 58px;
+  min-width: 0;
+  min-height: 40px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 10px;
+  padding: 6px 8px;
   background: #141b18;
 }
 
 .topic strong {
   display: block;
-  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
 }
 
 .topic span {
   display: block;
-  margin-top: 6px;
+  overflow: hidden;
+  margin-top: 3px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topic.alive {
@@ -250,7 +318,7 @@ h2 {
 
 .dvl-config dt {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .dvl-config dd {
@@ -264,6 +332,98 @@ h2 {
   grid-template-columns: 220px 1fr;
   gap: 10px;
   margin: 14px 0 0;
+}
+
+.control-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.control-layout {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.control-drive,
+.control-actions {
+  border: 1px solid color-mix(in srgb, var(--border), white 8%);
+  border-radius: 6px;
+  padding: 12px;
+  background: #141b18;
+}
+
+.control-enable-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 120px;
+  gap: 8px;
+}
+
+.control-enable {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 10px;
+  color: #c3d0c9;
+  font-weight: 750;
+}
+
+.control-enable input {
+  width: 18px;
+  height: 18px;
+}
+
+.control-sliders {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.control-sliders label {
+  display: grid;
+  gap: 6px;
+  min-height: 76px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  background: #0e1311;
+  color: #c3d0c9;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.control-sliders input {
+  width: 100%;
+}
+
+.control-sliders strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.control-actions h2 + .control-command-grid {
+  margin-top: 8px;
+}
+
+.control-command-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.control-command-grid:last-child {
+  margin-bottom: 0;
 }
 
 .bag-mode {
@@ -299,7 +459,7 @@ h2 {
 
 .bag-status dt {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .bag-status dd {
@@ -324,7 +484,7 @@ h2 {
   padding: 8px 10px;
   color: #dce8e1;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
@@ -354,7 +514,7 @@ h2 {
   justify-content: space-between;
   margin-top: 12px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .ekf-diagonal {
@@ -372,7 +532,7 @@ h2 {
   padding: 9px;
   background: #141b18;
   color: #c3d0c9;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -412,34 +572,604 @@ h2 {
   border-radius: 4px;
   background: #1e2823;
   color: #c3d0c9;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
 }
 
 .ekf-input {
   padding: 0 6px;
-  font-size: 12px;
+  font-size: 11px;
 }
 
-.path-panel {
-  grid-row: span 2;
+.path-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.path-controls {
+  display: grid;
+  grid-template-columns: 1.1fr 88px 1.4fr 1.4fr 96px repeat(3, 82px) 112px;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.path-controls label {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  min-height: 62px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  background: #141b18;
+  color: #c3d0c9;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.path-controls select,
+.path-controls input[type="number"] {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #0e1311;
+  color: var(--text);
+  font: inherit;
+}
+
+.path-controls input[type="number"] {
+  padding: 0 8px;
+}
+
+.path-controls input[type="color"] {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+  background: #0e1311;
+}
+
+.path-controls input[type="range"] {
+  width: 100%;
+}
+
+.path-controls strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.path-toggle {
+  justify-items: center;
+  text-align: center;
+}
+
+.path-toggle input {
+  width: 18px;
+  height: 18px;
+}
+
+#path-clear {
+  min-height: 62px;
 }
 
 canvas {
   display: block;
   width: 100%;
-  height: 360px;
+  height: 430px;
   margin-top: 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: #0b0f0e;
 }
 
-.joy-readout {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+.ps4-pad {
+  --pad-white: #eef0ee;
+  --pad-white-2: #dfe3e1;
+  --pad-black-2: #252a2f;
   margin-top: 14px;
+  min-width: 0;
+}
+
+.ps4-pad.offline {
+  opacity: 0.62;
+}
+
+.ps4-controller {
+  position: relative;
+  width: min(100%, 640px);
+  margin: 0 auto;
+  padding-top: 16px;
+}
+
+.ps4-shoulders {
+  position: absolute;
+  top: 2px;
+  right: 12%;
+  left: 12%;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 42%;
+  pointer-events: none;
+}
+
+.trigger-group {
+  display: grid;
+  gap: 2px;
+}
+
+.trigger-meter,
+.ps4-button,
+.ps4-mini-button,
+.ps4-guide-button,
+.ps4-touchpad,
+.ps4-side-button,
+.dpad-button,
+.dpad-center {
+  border: 1px solid rgba(20, 24, 28, 0.2);
+  color: #1d2328;
+  font-weight: 850;
+  line-height: 1;
+  user-select: none;
+}
+
+.trigger-meter {
+  position: relative;
+  display: grid;
+  min-height: 22px;
+  overflow: hidden;
+  place-items: center;
+  border-color: rgba(255, 255, 255, 0.28);
+  border-radius: 16px 16px 5px 5px;
+  background: linear-gradient(#444a53, #15191f);
+  color: #f8faf9;
+  box-shadow: inset 0 4px 6px rgba(255, 255, 255, 0.14);
+}
+
+.trigger-meter span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  background: color-mix(in srgb, var(--good), transparent 18%);
+  transition: width 80ms linear;
+}
+
+.trigger-meter strong {
+  position: relative;
+  z-index: 1;
+  font-size: 10px;
+}
+
+.ps4-button {
+  display: grid;
+  min-height: 30px;
+  place-items: center;
+  border-color: rgba(140, 146, 148, 0.42);
+  border-radius: 6px 6px 14px 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.68), transparent 36%),
+    linear-gradient(#f9faf8, #d8dddd);
+  color: #30383d;
+  font-size: 11px;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.9),
+    0 5px 9px rgba(18, 22, 24, 0.16);
+}
+
+.ps4-body {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(116px, 1fr) minmax(164px, 1.08fr) minmax(116px, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-height: 318px;
+  overflow: visible;
+  border: 1px solid rgba(109, 118, 121, 0.3);
+  border-radius: 74px 74px 132px 132px / 46px 46px 132px 132px;
+  padding: 34px 18px 26px;
+  background:
+    radial-gradient(ellipse at 18% 34%, #fafbf9 0 28%, transparent 29%),
+    radial-gradient(ellipse at 82% 34%, #fafbf9 0 28%, transparent 29%),
+    radial-gradient(ellipse at 22% 87%, #cbd0cf 0 28%, transparent 29%),
+    radial-gradient(ellipse at 78% 87%, #cbd0cf 0 28%, transparent 29%),
+    linear-gradient(145deg, #fcfdfb 0%, var(--pad-white) 48%, #d7dcda 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -16px 26px rgba(150, 158, 158, 0.16),
+    0 14px 26px rgba(0, 0, 0, 0.22);
+}
+
+.ps4-body::before,
+.ps4-body::after {
+  position: absolute;
+  bottom: -34px;
+  z-index: 0;
+  width: 142px;
+  height: 214px;
+  border: 1px solid rgba(120, 128, 130, 0.26);
+  border-radius: 58px 58px 70px 70px;
+  background:
+    linear-gradient(172deg, rgba(255, 255, 255, 0.86), rgba(211, 216, 215, 0.95)),
+    var(--pad-white-2);
+  box-shadow:
+    inset 0 -18px 24px rgba(160, 166, 166, 0.28),
+    0 8px 16px rgba(0, 0, 0, 0.12);
+  content: "";
+}
+
+.ps4-body::before {
+  left: -10px;
+  transform: rotate(12deg);
+}
+
+.ps4-body::after {
+  right: -10px;
+  transform: rotate(-12deg);
+}
+
+.pad-left,
+.pad-center,
+.pad-right {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  min-width: 0;
+}
+
+.pad-left,
+.pad-right {
+  gap: 18px;
+}
+
+.pad-center {
+  gap: 9px;
+}
+
+.dpad-cluster,
+.face-cluster,
+.stick-shell {
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(169, 176, 177, 0.35);
+  border-radius: 50%;
+  background: linear-gradient(145deg, #f8f9f7, #d9dddb);
+  box-shadow:
+    inset 0 1px 3px rgba(255, 255, 255, 0.95),
+    inset 0 -9px 18px rgba(173, 180, 180, 0.2);
+}
+
+.dpad-cluster,
+.face-cluster {
+  width: 112px;
+  aspect-ratio: 1;
+}
+
+.stick-shell {
+  width: 96px;
+  aspect-ratio: 1;
+}
+
+.stick {
+  position: relative;
+  width: 72px;
+  aspect-ratio: 1;
+  border: 5px solid #1c2025;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 45%, #3b4045 0 28%, #1b1f24 29% 50%, #0c0f12 52% 100%);
+  box-shadow:
+    inset 0 7px 13px rgba(255, 255, 255, 0.05),
+    inset 0 -8px 16px rgba(0, 0, 0, 0.58),
+    0 4px 7px rgba(0, 0, 0, 0.34);
+}
+
+.stick::before {
+  position: absolute;
+  inset: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: inherit;
+  background: radial-gradient(circle, #272c31, #111519);
+  content: "";
+}
+
+.stick strong {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  z-index: 2;
+  color: #8d969b;
+  font-size: 8px;
+}
+
+.stick-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 1;
+  width: 18px;
+  aspect-ratio: 1;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  background: #596166;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.42);
+  transform: translate(-50%, -50%);
+  transition: transform 80ms linear;
+}
+
+.dpad {
+  display: grid;
+  grid-template-areas:
+    ". up ."
+    "left mid right"
+    ". down .";
+  grid-template-columns: repeat(3, 34px);
+  grid-template-rows: repeat(3, 34px);
+  gap: 2px;
+}
+
+.dpad-button,
+.dpad-center {
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  font-size: 1px;
+}
+
+.dpad-up {
+  grid-area: up;
+  border-radius: 13px 13px 6px 6px;
+}
+
+.dpad-left {
+  grid-area: left;
+  border-radius: 13px 6px 6px 13px;
+}
+
+.dpad-center {
+  grid-area: mid;
+  border-radius: 8px;
+}
+
+.dpad-right {
+  grid-area: right;
+  border-radius: 6px 13px 13px 6px;
+}
+
+.dpad-down {
+  grid-area: down;
+  border-radius: 6px 6px 13px 13px;
+}
+
+.dpad-button,
+.dpad-center {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 35%),
+    var(--pad-black-2);
+  box-shadow:
+    inset 0 -4px 7px rgba(0, 0, 0, 0.45),
+    0 2px 4px rgba(0, 0, 0, 0.24);
+}
+
+.center-buttons,
+.stick-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.ps4-mini-button,
+.ps4-guide-button,
+.ps4-side-button {
+  display: grid;
+  place-items: center;
+}
+
+.ps4-mini-button {
+  min-width: 34px;
+  min-height: 20px;
+  border-radius: 999px;
+  background: #d7dcda;
+  color: #5d666b;
+  font-size: 8px;
+}
+
+.ps4-guide-button {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 50%;
+  border: 3px solid #262b30;
+  background:
+    radial-gradient(circle at 50% 36%, #333941, #12161a);
+  color: #f6f8f6;
+  font-size: 8px;
+  box-shadow:
+    inset 0 3px 5px rgba(255, 255, 255, 0.1),
+    0 3px 5px rgba(0, 0, 0, 0.22);
+}
+
+.touchpad-row {
+  display: grid;
+  grid-template-columns: 30px minmax(120px, 1fr) 30px;
+  align-items: start;
+  gap: 8px;
+  width: 100%;
+}
+
+.ps4-side-button {
+  min-height: 54px;
+  border-radius: 14px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.12), transparent 34%),
+    var(--pad-black-2);
+  color: #a8b0b4;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 7px;
+  letter-spacing: 0;
+}
+
+.ps4-touchpad {
+  display: grid;
+  width: 100%;
+  min-height: 86px;
+  overflow: hidden;
+  place-items: center;
+  border: 4px solid #20252b;
+  border-radius: 8px 8px 16px 16px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.09), transparent 36%),
+    #080a0d;
+  box-shadow:
+    inset 0 4px 9px rgba(255, 255, 255, 0.08),
+    0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
+.touchpad-texture {
+  width: 100%;
+  height: 100%;
+  background-image: radial-gradient(rgba(122, 132, 139, 0.42) 1px, transparent 1px);
+  background-position: 0 0;
+  background-size: 7px 7px;
+  opacity: 0.56;
+}
+
+.ps4-speaker {
+  display: grid;
+  grid-template-columns: repeat(5, 7px);
+  justify-content: center;
+  gap: 5px;
+}
+
+.ps4-speaker span {
+  width: 7px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: #050607;
+}
+
+.ps4-speaker span:nth-child(1),
+.ps4-speaker span:nth-child(5),
+.ps4-speaker span:nth-child(11),
+.ps4-speaker span:nth-child(12) {
+  opacity: 0;
+}
+
+.ps4-port {
+  width: 78px;
+  height: 8px;
+  border-radius: 999px 999px 0 0;
+  background: #0c0f12;
+  box-shadow: inset 0 2px 3px rgba(255, 255, 255, 0.12);
+}
+
+#joy-gamepad-state {
+  max-width: 220px;
+  color: #5f696d;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.face-buttons {
+  display: grid;
+  grid-template-areas:
+    ". y ."
+    "x . b"
+    ". a .";
+  grid-template-columns: repeat(3, 38px);
+  grid-template-rows: repeat(3, 38px);
+  gap: 4px;
+}
+
+.face-button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  aspect-ratio: 1;
+  border: 4px solid #282d33;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 35%, #343a40, #171b20 68%);
+  font-size: 24px;
+  font-weight: 900;
+  box-shadow:
+    inset 0 3px 5px rgba(255, 255, 255, 0.08),
+    0 3px 5px rgba(0, 0, 0, 0.23);
+}
+
+.face-cross {
+  grid-area: a;
+  color: #6ec6ff;
+}
+
+.face-circle {
+  grid-area: b;
+  color: #ff7777;
+}
+
+.face-square {
+  grid-area: x;
+  color: #f28acb;
+}
+
+.face-triangle {
+  grid-area: y;
+  color: #56d984;
+}
+
+.ps4-button.pressed,
+.ps4-mini-button.pressed,
+.ps4-guide-button.pressed,
+.ps4-touchpad.pressed,
+.ps4-side-button.pressed,
+.trigger-meter.pressed,
+.dpad-button.pressed {
+  border-color: color-mix(in srgb, var(--good), black 8%);
+  background: var(--good);
+  color: #07120d;
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--good), transparent 72%),
+    0 4px 9px rgba(0, 0, 0, 0.18);
+}
+
+.face-button.pressed {
+  color: #07120d;
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--good), transparent 72%),
+    0 3px 7px rgba(0, 0, 0, 0.28);
+}
+
+.face-cross.pressed {
+  border-color: #6ec6ff;
+  background: #6ec6ff;
+}
+
+.face-circle.pressed {
+  border-color: #ff7777;
+  background: #ff7777;
+}
+
+.face-square.pressed {
+  border-color: #f28acb;
+  background: #f28acb;
+}
+
+.face-triangle.pressed {
+  border-color: #56d984;
+  background: #56d984;
 }
 
 pre {
@@ -447,13 +1177,13 @@ pre {
   margin: 8px 0 0;
   color: #dce8e1;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
 }
 
 .logs {
-  grid-column: 1 / -1;
+  grid-area: logs;
 }
 
 #log-output {
@@ -465,16 +1195,34 @@ pre {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .grid {
+  .dashboard-grid {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "telemetry"
+      "path"
+      "logs";
+  }
+
+  .state-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "topics"
+      "joy"
+      "dvl";
   }
 
   .dvl-command-grid,
   .dvl-config,
+  .control-layout,
   .bag-status,
   .bag-topic-list,
-  .ekf-diagonal {
+  .ekf-diagonal,
+  .path-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #path-clear {
+    grid-column: span 2;
   }
 }
 
@@ -493,13 +1241,108 @@ pre {
   .controls,
   .dvl-command-grid,
   .dvl-config,
+  .control-layout,
+  .control-enable-row,
+  .control-sliders,
+  .control-command-grid,
   .bag-status,
   .bag-topic-list,
   .ekf-diagonal,
-  .telemetry dl,
-  .topic-list,
-  .joy-readout {
+  .path-controls,
+  .telemetry dl {
     grid-template-columns: 1fr;
     width: 100%;
+  }
+
+  .topic-list {
+    grid-template-rows: none;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .ps4-shoulders {
+    right: 7%;
+    left: 7%;
+    gap: 32%;
+  }
+
+  .ps4-body {
+    grid-template-columns: minmax(82px, 0.9fr) minmax(118px, 1.1fr) minmax(82px, 0.9fr);
+    gap: 4px;
+    min-height: 264px;
+    border-radius: 52px 52px 100px 100px / 38px 38px 100px 100px;
+    padding: 28px 9px 18px;
+  }
+
+  .ps4-body::before,
+  .ps4-body::after {
+    bottom: -28px;
+    width: 108px;
+    height: 174px;
+  }
+
+  .dpad-cluster,
+  .face-cluster {
+    width: 88px;
+  }
+
+  .dpad {
+    grid-template-columns: repeat(3, 28px);
+    grid-template-rows: repeat(3, 28px);
+  }
+
+  .face-buttons {
+    grid-template-columns: repeat(3, 30px);
+    grid-template-rows: repeat(3, 30px);
+  }
+
+  .face-button {
+    width: 29px;
+    font-size: 20px;
+  }
+
+  .stick-shell {
+    width: 78px;
+  }
+
+  .stick {
+    width: 58px;
+  }
+
+  .stick-dot {
+    width: 15px;
+  }
+
+  .pad-left,
+  .pad-right {
+    gap: 13px;
+  }
+
+  .pad-center {
+    gap: 7px;
+  }
+
+  .touchpad-row {
+    grid-template-columns: 24px minmax(82px, 1fr) 24px;
+    gap: 5px;
+  }
+
+  .ps4-touchpad {
+    min-height: 62px;
+  }
+
+  .ps4-side-button {
+    min-height: 44px;
+    font-size: 6px;
+  }
+
+  #joy-gamepad-state {
+    max-width: 156px;
+    font-size: 8px;
+  }
+
+  #path-clear {
+    grid-column: auto;
   }
 }

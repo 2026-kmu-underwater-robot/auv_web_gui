@@ -10,6 +10,9 @@ from dvl_msgs.msg import ConfigCommand
 from dvl_msgs.msg import ConfigStatus
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import TwistWithCovarianceStamped
+from mavros_msgs.msg import State
+from mavros_msgs.srv import CommandBool
+from mavros_msgs.srv import SetMode
 from rclpy.executors import ExternalShutdownException
 from rclpy.executors import SingleThreadedExecutor
 from nav_msgs.msg import Odometry
@@ -17,6 +20,11 @@ from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
 from sensor_msgs.msg import Imu
 from sensor_msgs.msg import Joy
+
+
+PATH_MIN_DISTANCE_M = 0.01
+WEB_CONTROL_TIMEOUT_S = 0.35
+WEB_CONTROL_PERIOD_S = 0.05
 
 
 def _yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
@@ -67,6 +75,7 @@ class LocalizationRosNode(Node):
             "dvl": TopicHealth("/dvl/twist"),
             "depth": TopicHealth("/depth/pose"),
             "imu": TopicHealth("/mavros/imu/data"),
+            "mavros_state": TopicHealth("/mavros/state", stale_after=2.0),
             "joy": TopicHealth("/joy", stale_after=0.5),
             "battery": TopicHealth("/battery", stale_after=3.0),
         }
@@ -80,24 +89,51 @@ class LocalizationRosNode(Node):
             "percentage": None,
             "present": False,
         }
+        self._mavros_state = {
+            "connected": False,
+            "armed": False,
+            "guided": False,
+            "manual_input": False,
+            "mode": "",
+            "system_status": None,
+            "updated_at": "",
+        }
         self._joy = {"axes": [], "buttons": []}
         self._dvl_config: dict = {}
         self._dvl_events: deque[dict] = deque(maxlen=40)
-        self._path: deque[dict[str, float]] = deque(maxlen=1200)
+        self._path: list[dict[str, float]] = []
+        self._web_control = {
+            "enabled": False,
+            "active": False,
+            "axes": {
+                "forward": 0.0,
+                "lateral": 0.0,
+                "vertical": 0.0,
+                "yaw": 0.0,
+            },
+            "last_command": 0.0,
+            "last_publish": "",
+            "neutral_burst": 0,
+        }
 
         self._dvl_config_pub = self.create_publisher(
             ConfigCommand,
             "/dvl/config/command",
             10,
         )
+        self._web_joy_pub = self.create_publisher(Joy, "/joy", 10)
+        self._arm_client = self.create_client(CommandBool, "/mavros/cmd/arming")
+        self._set_mode_client = self.create_client(SetMode, "/mavros/set_mode")
         self.create_subscription(Odometry, "/odometry/filtered", self._on_odom, 20)
         self.create_subscription(TwistWithCovarianceStamped, "/dvl/twist", self._on_dvl, 20)
         self.create_subscription(CommandResponse, "/dvl/command/response", self._on_dvl_response, 20)
         self.create_subscription(ConfigStatus, "/dvl/config/status", self._on_dvl_config, 20)
         self.create_subscription(PoseWithCovarianceStamped, "/depth/pose", self._on_depth, 20)
         self.create_subscription(BatteryState, "/battery", self._on_battery, 20)
+        self.create_subscription(State, "/mavros/state", self._on_mavros_state, 20)
         self.create_subscription(Imu, "/mavros/imu/data", self._on_imu, 20)
         self.create_subscription(Joy, "/joy", self._on_joy, 20)
+        self.create_timer(WEB_CONTROL_PERIOD_S, self._publish_web_control)
 
     def publish_dvl_command(
         self,
@@ -131,10 +167,55 @@ class LocalizationRosNode(Node):
                     "axes": list(self._joy["axes"]),
                     "buttons": list(self._joy["buttons"]),
                 },
+                "mavros_state": dict(self._mavros_state),
                 "dvl_config": dict(self._dvl_config),
                 "dvl_events": list(self._dvl_events),
                 "path": list(self._path),
+                "path_count": len(self._path),
+                "web_control": self._web_control_snapshot(),
             }
+
+    def clear_path(self) -> None:
+        with self._lock:
+            self._path.clear()
+
+    def set_web_control_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._web_control["enabled"] = enabled
+            self._web_control["active"] = False
+            self._web_control["last_command"] = time.monotonic()
+            if not enabled:
+                self._web_control["neutral_burst"] = 8
+
+    def update_web_control_command(self, axes: dict, active: bool) -> None:
+        clean_axes = {
+            "forward": _clamp_axis(axes.get("forward", 0.0)),
+            "lateral": _clamp_axis(axes.get("lateral", 0.0)),
+            "vertical": _clamp_axis(axes.get("vertical", 0.0)),
+            "yaw": _clamp_axis(axes.get("yaw", 0.0)),
+        }
+        with self._lock:
+            self._web_control["active"] = bool(active)
+            self._web_control["axes"] = clean_axes
+            self._web_control["last_command"] = time.monotonic()
+
+    def set_armed(self, armed: bool) -> bool:
+        if not self._arm_client.wait_for_service(timeout_sec=0.2):
+            self.get_logger().warn("Arming service not available.")
+            return False
+        request = CommandBool.Request()
+        request.value = bool(armed)
+        self._arm_client.call_async(request)
+        return True
+
+    def set_mode(self, mode: str) -> bool:
+        if not self._set_mode_client.wait_for_service(timeout_sec=0.2):
+            self.get_logger().warn("Set mode service not available.")
+            return False
+        request = SetMode.Request()
+        request.custom_mode = mode
+        self._set_mode_client.call_async(request)
+        return True
 
     def _on_odom(self, msg: Odometry) -> None:
         pose = msg.pose.pose
@@ -152,7 +233,64 @@ class LocalizationRosNode(Node):
                 "z": pose.position.z,
                 "yaw": yaw,
             }
-            self._path.append({"x": pose.position.x, "y": pose.position.y})
+            self._append_path_point(pose.position.x, pose.position.y)
+
+    def _append_path_point(self, x: float, y: float) -> None:
+        if not math.isfinite(x) or not math.isfinite(y):
+            return
+        if self._path:
+            last = self._path[-1]
+            if math.hypot(x - last["x"], y - last["y"]) < PATH_MIN_DISTANCE_M:
+                return
+        self._path.append({"x": x, "y": y})
+
+    def _web_control_snapshot(self) -> dict:
+        now = time.monotonic()
+        last_command = self._web_control["last_command"]
+        age = None if last_command == 0.0 else now - last_command
+        return {
+            "enabled": bool(self._web_control["enabled"]),
+            "active": bool(self._web_control["active"]),
+            "fresh": age is not None and age <= WEB_CONTROL_TIMEOUT_S,
+            "age": age,
+            "axes": dict(self._web_control["axes"]),
+            "last_publish": self._web_control["last_publish"],
+        }
+
+    def _publish_web_control(self) -> None:
+        with self._lock:
+            enabled = bool(self._web_control["enabled"])
+            neutral_burst = int(self._web_control["neutral_burst"])
+            if not enabled and neutral_burst <= 0:
+                return
+
+            now = time.monotonic()
+            fresh = now - self._web_control["last_command"] <= WEB_CONTROL_TIMEOUT_S
+            active = enabled and bool(self._web_control["active"]) and fresh
+            axes = dict(self._web_control["axes"]) if active else {
+                "forward": 0.0,
+                "lateral": 0.0,
+                "vertical": 0.0,
+                "yaw": 0.0,
+            }
+            if not enabled:
+                self._web_control["neutral_burst"] = max(0, neutral_burst - 1)
+            self._web_control["last_publish"] = time.strftime("%H:%M:%S")
+
+        msg = Joy()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.axes = [
+            axes["lateral"],
+            axes["forward"],
+            axes["yaw"],
+            axes["vertical"],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        msg.buttons = [0] * 12
+        self._web_joy_pub.publish(msg)
 
     def _on_dvl(self, msg: TwistWithCovarianceStamped) -> None:
         linear = msg.twist.twist.linear
@@ -208,6 +346,19 @@ class LocalizationRosNode(Node):
                 "temperature": _finite_or_none(msg.temperature),
                 "percentage": _finite_or_none(msg.percentage),
                 "present": bool(msg.present),
+            }
+
+    def _on_mavros_state(self, msg: State) -> None:
+        with self._lock:
+            self._health["mavros_state"].tick()
+            self._mavros_state = {
+                "connected": bool(msg.connected),
+                "armed": bool(msg.armed),
+                "guided": bool(msg.guided),
+                "manual_input": bool(msg.manual_input),
+                "mode": msg.mode,
+                "system_status": int(msg.system_status),
+                "updated_at": time.strftime("%H:%M:%S"),
             }
 
     def _on_imu(self, msg: Imu) -> None:
@@ -299,3 +450,38 @@ class RosInterface:
 
     def reset_dvl_dead_reckoning(self) -> None:
         self.publish_dvl_command("reset_dead_reckoning")
+
+    def clear_path(self) -> None:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        self.node.clear_path()
+
+    def set_web_control_enabled(self, enabled: bool) -> None:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        self.node.set_web_control_enabled(enabled)
+
+    def update_web_control_command(self, axes: dict, active: bool) -> None:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        self.node.update_web_control_command(axes, active)
+
+    def set_armed(self, armed: bool) -> bool:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.set_armed(armed)
+
+    def set_mode(self, mode: str) -> bool:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.set_mode(mode)
+
+
+def _clamp_axis(value: object) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(numeric):
+        return 0.0
+    return max(-1.0, min(1.0, numeric))
