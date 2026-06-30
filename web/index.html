@@ -161,6 +161,7 @@
           <article class="panel dvl-panel">
             <h2>DVL Commands</h2>
             <div class="dvl-command-grid">
+              <button id="test-start" class="primary">Run Test</button>
               <button data-dvl-command="get_config">Get Config</button>
               <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="true">Acoustic On</button>
               <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="false">Acoustic Off</button>
@@ -172,6 +173,10 @@
               <button data-dvl-command="reset_dead_reckoning" class="danger">Reset DR</button>
             </div>
             <dl class="dvl-config">
+              <div>
+                <dt>Test</dt>
+                <dd id="test-state">Idle</dd>
+              </div>
               <div>
                 <dt>Updated</dt>
                 <dd id="dvl-updated">--</dd>
@@ -367,6 +372,7 @@
             <div class="panel-actions">
               <button id="start-bag" class="primary">Start Bag</button>
               <button id="stop-bag">Stop Bag</button>
+              <button id="analyze-bag">Analyze Bag</button>
               <button id="bag-refresh-topics">Refresh Topics</button>
             </div>
           </div>
@@ -389,7 +395,14 @@
               <dt>Output</dt>
               <dd id="bag-output">--</dd>
             </div>
+            <div>
+              <dt>Analysis</dt>
+              <dd id="bag-analysis-state">--</dd>
+            </div>
           </dl>
+          <div id="bag-analysis-summary" class="analysis-summary"></div>
+          <canvas id="analysis-canvas" class="analysis-canvas" width="640" height="320"></canvas>
+          <pre id="bag-analysis-output">--</pre>
           <div id="bag-topic-list" class="bag-topic-list"></div>
           <pre id="bag-log-output"></pre>
         </article>

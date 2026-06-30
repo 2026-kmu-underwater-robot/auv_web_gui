@@ -15,6 +15,8 @@ from fastapi import WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from kmu26_auv_web_gui.bag_analyzer import analyze_bag
+from kmu26_auv_web_gui.bag_analyzer import write_analysis_artifacts
 from kmu26_auv_web_gui.ekf_config import read_process_noise_covariance
 from kmu26_auv_web_gui.ekf_config import write_process_noise_covariance
 from kmu26_auv_web_gui.process_manager import ProcessManager
@@ -24,7 +26,12 @@ from kmu26_auv_web_gui.ros_interface import RosInterface
 DEFAULT_BAG_TOPICS = [
     "/joy",
     "/battery",
+    "/dvl/command/response",
+    "/dvl/config/command",
+    "/dvl/config/status",
     "/dvl/data",
+    "/dvl/odometry",
+    "/dvl/position",
     "/dvl/twist",
     "/depth/pose",
     "/mavros/imu/data",
@@ -173,6 +180,22 @@ def create_app(
         }
         return payload
 
+    @app.post("/api/test/start")
+    async def start_localization_test(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        try:
+            test = await asyncio.to_thread(
+                _run_localization_test,
+                process_manager,
+                ros_interface,
+                body,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = _status(process_manager, ros_interface)
+        payload["test"] = test
+        return payload
+
     @app.post("/api/control/enable")
     async def set_control_enabled(request: Request) -> dict:
         body = await _json_or_empty(request)
@@ -247,6 +270,26 @@ def create_app(
             "topics": topics,
         }
 
+    @app.post("/api/bag/analyze")
+    async def run_bag_analysis(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        process_status = process_manager.status()
+        if process_status.get("bag_running"):
+            raise HTTPException(status_code=400, detail="stop bag recording before analysis")
+
+        bag_path = str(body.get("path") or process_status.get("bag_output") or "")
+        if not bag_path:
+            raise HTTPException(status_code=400, detail="no bag output path is available")
+
+        try:
+            analysis = await asyncio.to_thread(_analyze_and_write_bag, bag_path)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        payload = _status(process_manager, ros_interface)
+        payload["analysis"] = analysis
+        return payload
+
     @app.websocket("/ws/status")
     async def status_ws(websocket: WebSocket) -> None:
         await websocket.accept()
@@ -272,6 +315,155 @@ def _status(process_manager: ProcessManager, ros_interface: RosInterface) -> dic
         "process": process_manager.status(),
         "ros": ros_interface.status(),
     }
+
+
+def _run_localization_test(
+    process_manager: ProcessManager,
+    ros_interface: RosInterface,
+    body: dict,
+) -> dict:
+    launch_args = body.get("launch_args", {})
+    if not isinstance(launch_args, dict):
+        raise RuntimeError("launch_args must be an object")
+    launch_args = {str(key): str(value) for key, value in launch_args.items()}
+
+    topics = body.get("topics") or DEFAULT_BAG_TOPICS
+    if not isinstance(topics, list):
+        raise RuntimeError("topics must be a list")
+
+    record_all = bool(body.get("record_all", False))
+    steps: list[dict[str, str]] = []
+    bag_output = process_manager.status().get("bag_output", "")
+
+    if process_manager.stack_running:
+        _append_test_step(steps, "stack", "skipped", "already running")
+    else:
+        process_manager.start_stack(launch_args)
+        _append_test_step(steps, "stack", "ok", "started")
+        time.sleep(1.0)
+
+    publisher_count = _wait_for_topic_publisher(ros_interface, "/dvl/data", timeout=8.0)
+    if publisher_count <= 0:
+        raise RuntimeError("DVL data publisher was not discovered")
+    _append_test_step(steps, "dvl_data", "ok", f"{publisher_count} publisher(s)")
+
+    subscriber_count = _wait_for_dvl_command_subscriber(ros_interface, timeout=4.0)
+    if subscriber_count <= 0:
+        raise RuntimeError("DVL command subscriber was not discovered")
+    _append_test_step(steps, "dvl_command", "ok", f"{subscriber_count} subscriber(s)")
+
+    if process_manager.status().get("bag_running"):
+        _append_test_step(steps, "bag", "skipped", bag_output or "already recording")
+    else:
+        bag_output = process_manager.start_bag(topics, record_all=record_all)
+        _append_test_step(steps, "bag", "ok", bag_output)
+        time.sleep(0.7)
+
+    _send_dvl_command_step(
+        ros_interface,
+        steps,
+        "set_config",
+        "acoustic_enabled",
+        "true",
+    )
+    time.sleep(0.25)
+    _send_dvl_command_step(
+        ros_interface,
+        steps,
+        "set_config",
+        "range_mode",
+        "auto",
+    )
+    time.sleep(0.25)
+    _send_dvl_command_step(ros_interface, steps, "get_config")
+    time.sleep(0.25)
+    _send_dvl_command_step(ros_interface, steps, "reset_dead_reckoning")
+    time.sleep(1.0)
+
+    previous_pose = ros_interface.status().get("pose", {})
+    restart = process_manager.restart_localization_filter()
+    _append_test_step(steps, "ekf", "ok", "restarted")
+    fresh_since = time.monotonic()
+    odom_refreshed = ros_interface.wait_for_odom_after(fresh_since, timeout=6.0)
+    set_pose = None
+    if odom_refreshed:
+        set_pose = ros_interface.set_localization_origin()
+        _append_test_step(steps, "origin", "ok", "set_pose sent")
+    else:
+        _append_test_step(steps, "origin", "warn", "odometry did not refresh")
+
+    ros_interface.clear_path()
+    _append_test_step(steps, "path", "ok", "cleared")
+
+    warning = next((step["detail"] for step in steps if step["status"] == "warn"), "")
+    return {
+        "message": f"Ready with warning: {warning}" if warning else "Ready",
+        "bag_output": bag_output,
+        "origin": {
+            "method": "test_sequence_restart_then_set_pose",
+            "previous_pose": previous_pose,
+            "restart": restart,
+            "set_pose": set_pose,
+            "odom_refreshed": odom_refreshed,
+        },
+        "steps": steps,
+    }
+
+
+def _append_test_step(
+    steps: list[dict[str, str]],
+    name: str,
+    status: str,
+    detail: str = "",
+) -> None:
+    steps.append({"name": name, "status": status, "detail": detail})
+
+
+def _wait_for_dvl_command_subscriber(
+    ros_interface: RosInterface,
+    timeout: float,
+) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        count = ros_interface.dvl_command_subscriber_count()
+        if count > 0:
+            return count
+        time.sleep(0.1)
+    return ros_interface.dvl_command_subscriber_count()
+
+
+def _wait_for_topic_publisher(
+    ros_interface: RosInterface,
+    topic: str,
+    timeout: float,
+) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        count = ros_interface.topic_publisher_count(topic)
+        if count > 0:
+            return count
+        time.sleep(0.1)
+    return ros_interface.topic_publisher_count(topic)
+
+
+def _send_dvl_command_step(
+    ros_interface: RosInterface,
+    steps: list[dict[str, str]],
+    command: str,
+    parameter_name: str = "",
+    parameter_value: str = "",
+) -> None:
+    ros_interface.publish_dvl_command(command, parameter_name, parameter_value)
+    detail = parameter_name
+    if parameter_value:
+        detail = f"{detail}={parameter_value}" if detail else parameter_value
+    _append_test_step(steps, f"dvl_{command}", "ok", detail)
+
+
+def _analyze_and_write_bag(bag_path: str) -> dict:
+    result = analyze_bag(bag_path)
+    write_analysis_artifacts(result)
+    return result
 
 
 def main() -> None:

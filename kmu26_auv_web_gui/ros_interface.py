@@ -194,6 +194,12 @@ class LocalizationRosNode(Node):
         with self._lock:
             self._path.clear()
 
+    def dvl_command_subscriber_count(self) -> int:
+        return self._dvl_config_pub.get_subscription_count()
+
+    def topic_publisher_count(self, topic: str) -> int:
+        return len(self.get_publishers_info_by_topic(topic))
+
     def wait_for_odom_after(self, timestamp: float, timeout: float = 5.0) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -544,6 +550,16 @@ class RosInterface:
         if self.node is None:
             raise RuntimeError("ROS interface is not running")
         self.node.clear_path()
+
+    def dvl_command_subscriber_count(self) -> int:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.dvl_command_subscriber_count()
+
+    def topic_publisher_count(self, topic: str) -> int:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.topic_publisher_count(topic)
 
     def set_localization_origin(self) -> dict:
         if self.node is None:

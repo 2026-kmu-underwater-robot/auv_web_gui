@@ -24,6 +24,18 @@ def _default_dronecan_python() -> str:
     return sys.executable
 
 
+def _default_bag_output_root() -> Path:
+    home_catkin_ws = Path.home() / "catkin_ws"
+    if home_catkin_ws.exists():
+        return home_catkin_ws
+
+    cwd = Path.cwd()
+    if (cwd / "src").is_dir() and (cwd / "install").is_dir():
+        return cwd
+
+    return home_catkin_ws
+
+
 class ManagedProcess:
     def __init__(self, name: str, cmd: list[str], log_buffer: deque[str]):
         self.name = name
@@ -219,14 +231,15 @@ class ProcessManager:
     def start_bag(
         self,
         topics: Iterable[str] | None = None,
-        output_root: str = "~/auv_localization_bags",
+        output_root: str | os.PathLike[str] | None = None,
         record_all: bool = False,
     ) -> str:
         if self._bag and self._bag.is_running:
             raise RuntimeError("bag recording is already running")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(output_root).expanduser() / f"localization_{timestamp}"
+        root = Path(output_root).expanduser() if output_root else _default_bag_output_root()
+        output_dir = root / f"localization_{timestamp}"
         output_dir.parent.mkdir(parents=True, exist_ok=True)
         topic_list = [topic for topic in (topics or []) if topic]
         if record_all:

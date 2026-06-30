@@ -12,6 +12,16 @@ const state = {
     error: "",
     defaultTopics: [],
     topics: [],
+    analysis: {
+      running: false,
+      result: null,
+      error: "",
+    },
+  },
+  test: {
+    running: false,
+    message: "Idle",
+    steps: [],
   },
   path: {
     points: [],
@@ -51,6 +61,20 @@ function fmt(value, digits = 2) {
 function fmtUnit(value, unit, digits = 2) {
   const text = fmt(value, digits);
   return text === "--" ? "--" : `${text} ${unit}`;
+}
+
+function fmtPercent(value, digits = 1) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${(value * 100).toFixed(digits)} %`
+    : "--";
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function setPill(id, active, label) {
@@ -119,6 +143,12 @@ function bindControls() {
   });
   $("bag-refresh-topics").addEventListener("click", () => {
     loadBagTopics().catch(showError);
+  });
+  $("analyze-bag").addEventListener("click", () => {
+    analyzeBag().catch(showError);
+  });
+  $("test-start").addEventListener("click", () => {
+    runLocalizationTest().catch(showError);
   });
 
   document.querySelectorAll("[data-dvl-command]").forEach((button) => {
@@ -221,6 +251,7 @@ function renderStatus(payload) {
   renderMavrosState(mavrosState, topics.mavros_state);
   renderJoyGamepad(joy, topics.joy);
   renderDvl(dvlConfig, dvlEvents);
+  renderTestState();
   renderBag(process);
   renderTopics(topics);
   renderWebControlStatus(webControl);
@@ -499,6 +530,7 @@ function renderBag(process) {
   $("bag-log-output").textContent = (process.logs || [])
     .filter((line) => line.includes("[bag]") || line.includes("ros2 bag record"))
     .join("\n");
+  renderBagAnalysis();
 }
 
 async function loadBagTopics() {
@@ -559,6 +591,213 @@ async function startBag() {
     record_all: recordAll,
     topics,
   });
+}
+
+async function analyzeBag() {
+  state.bag.analysis.running = true;
+  state.bag.analysis.error = "";
+  renderBagAnalysis();
+  try {
+    const payload = await postJson("/api/bag/analyze", {});
+    state.bag.analysis.result = payload.analysis || null;
+    renderStatus(payload);
+  } catch (error) {
+    state.bag.analysis.error = error.message;
+    throw error;
+  } finally {
+    state.bag.analysis.running = false;
+    renderBagAnalysis();
+  }
+}
+
+function renderBagAnalysis() {
+  const analysis = state.bag.analysis;
+  $("analyze-bag").disabled = analysis.running;
+  if (analysis.running) {
+    $("bag-analysis-state").textContent = "Analyzing";
+    return;
+  }
+
+  const result = analysis.result;
+  if (analysis.error) {
+    $("bag-analysis-state").textContent = "Failed";
+    $("bag-analysis-summary").innerHTML = `<div class="analysis-message bad">${escapeHtml(analysis.error)}</div>`;
+    $("bag-analysis-output").textContent = analysis.error;
+    drawAnalysisCanvas(null);
+    return;
+  }
+  if (!result) {
+    $("bag-analysis-state").textContent = "--";
+    $("bag-analysis-summary").innerHTML = "";
+    $("bag-analysis-output").textContent = "--";
+    drawAnalysisCanvas(null);
+    return;
+  }
+
+  const status = result.assessment?.status || "--";
+  $("bag-analysis-state").textContent = status.toUpperCase();
+  $("bag-analysis-summary").innerHTML = analysisSummaryHtml(result);
+  $("bag-analysis-output").textContent = analysisText(result);
+  drawAnalysisCanvas(result);
+}
+
+function analysisSummaryHtml(result) {
+  const filtered = result.odometry?.filtered || {};
+  const dvlOdom = result.odometry?.dvl_odom || {};
+  const dvlDr = result.odometry?.dvl_dr || {};
+  const dvlData = result.dvl?.data || {};
+  const dvlTwist = result.dvl?.twist || {};
+  return [
+    analysisMetric("Filtered Length", fmtUnit(filtered.path_length_m, "m")),
+    analysisMetric("Closure", fmtUnit(filtered.start_end_error_m, "m")),
+    analysisMetric("Est. Laps", fmt(Math.abs(filtered.estimated_laps || 0), 2)),
+    analysisMetric("DVL Valid", fmtPercent(dvlData.valid_rate)),
+    analysisMetric("DVL FOM", fmt(dvlData.fom?.mean, 3)),
+    analysisMetric("DVL Alt Min", fmtUnit(dvlData.altitude_m?.min, "m", 2)),
+    analysisMetric("DVL Odom Length", fmtUnit(dvlOdom.path_length_m, "m")),
+    analysisMetric("DVL DR Length", fmtUnit(dvlDr.path_length_m, "m")),
+    analysisMetric("Twist Speed Max", fmtUnit(dvlTwist.speed_mps?.max, "m/s", 2)),
+  ].join("");
+}
+
+function analysisMetric(label, value) {
+  return `
+    <div>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || "--")}</strong>
+    </div>`;
+}
+
+function analysisText(result) {
+  const lines = [
+    `Bag: ${result.bag_path || "--"}`,
+    `Report Dir: ${result.report_dir || "--"}`,
+    `Result File: ${result.result_path || "--"}`,
+    `Image File: ${result.image_path || "--"}`,
+    `Generated: ${result.generated_at || "--"}`,
+    "",
+    "Notes:",
+  ];
+  const notes = result.assessment?.notes || [];
+  if (notes.length === 0) {
+    lines.push("OK");
+  } else {
+    notes.forEach((note) => {
+      lines.push(`${String(note.level || "info").toUpperCase()} ${note.message || ""}`);
+    });
+  }
+  return lines.join("\n");
+}
+
+function drawAnalysisCanvas(result) {
+  const canvas = $("analysis-canvas");
+  const { ctx, width, height } = resizePathCanvas(canvas);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#0b0f0e";
+  ctx.fillRect(0, 0, width, height);
+
+  if (!result) return;
+
+  const tracks = [
+    { name: "filtered", label: "EKF", color: "#6ec6ff", points: result.samples?.filtered || [] },
+    { name: "dvl_odom", label: "DVL Odom", color: "#52d273", points: result.samples?.dvl_odom || [] },
+    { name: "dvl_dr", label: "DVL DR", color: "#f0b84f", points: result.samples?.dvl_dr || [] },
+  ].filter((track) => track.points.length > 1);
+  if (tracks.length === 0) return;
+
+  const allPoints = tracks.flatMap((track) => track.points);
+  const xs = allPoints.map((point) => point.x);
+  const ys = allPoints.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = Math.max(maxX - minX, 1);
+  const spanY = Math.max(maxY - minY, 1);
+  const view = {
+    centerX: (minX + maxX) / 2,
+    centerY: (minY + maxY) / 2,
+    pixelsPerMeter: clamp(0.78 * Math.min(width / spanX, height / spanY), 2, 240),
+  };
+
+  drawPathGrid(ctx, view, width, height, { gridStep: niceGridStep(Math.max(spanX, spanY)) });
+  drawPathAxes(ctx, view, width, height);
+  tracks.forEach((track) => drawAnalysisTrack(ctx, track, view, width, height));
+  drawAnalysisLegend(ctx, tracks);
+}
+
+function drawAnalysisTrack(ctx, track, view, width, height) {
+  ctx.save();
+  ctx.lineWidth = track.name === "filtered" ? 2.5 : 1.8;
+  ctx.strokeStyle = track.color;
+  ctx.globalAlpha = track.name === "filtered" ? 1 : 0.78;
+  ctx.beginPath();
+  track.points.forEach((point, index) => {
+    const screen = pathToScreen(point, view, width, height);
+    if (index === 0) ctx.moveTo(screen.x, screen.y);
+    else ctx.lineTo(screen.x, screen.y);
+  });
+  ctx.stroke();
+
+  const first = pathToScreen(track.points[0], view, width, height);
+  const last = pathToScreen(track.points[track.points.length - 1], view, width, height);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = track.color;
+  ctx.beginPath();
+  ctx.arc(first.x, first.y, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = track.color;
+  ctx.strokeRect(last.x - 4, last.y - 4, 8, 8);
+  ctx.restore();
+}
+
+function drawAnalysisLegend(ctx, tracks) {
+  ctx.save();
+  ctx.font = "12px sans-serif";
+  ctx.textBaseline = "top";
+  let x = 12;
+  const y = 12;
+  tracks.forEach((track) => {
+    ctx.fillStyle = track.color;
+    ctx.fillRect(x, y + 4, 16, 3);
+    ctx.fillStyle = "#dce8e1";
+    ctx.fillText(track.label, x + 22, y);
+    x += ctx.measureText(track.label).width + 54;
+  });
+  ctx.restore();
+}
+
+function niceGridStep(span) {
+  if (span <= 2) return 0.25;
+  if (span <= 5) return 0.5;
+  if (span <= 12) return 1;
+  if (span <= 30) return 2;
+  return 5;
+}
+
+async function runLocalizationTest() {
+  state.test.running = true;
+  state.test.message = "Running";
+  state.test.steps = [];
+  renderTestState();
+  try {
+    const payload = await postJson("/api/test/start", {});
+    const test = payload.test || {};
+    state.test.message = test.message || "Ready";
+    state.test.steps = test.steps || [];
+    renderStatus(payload);
+  } catch (error) {
+    state.test.message = "Failed";
+    throw error;
+  } finally {
+    state.test.running = false;
+    renderTestState();
+  }
+}
+
+function renderTestState() {
+  $("test-state").textContent = state.test.running ? "Running" : state.test.message;
+  $("test-start").disabled = state.test.running;
 }
 
 function renderDvl(config, events) {

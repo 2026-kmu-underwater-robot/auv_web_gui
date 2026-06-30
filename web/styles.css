@@ -45,6 +45,11 @@ button:active {
   transform: translateY(1px);
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 button.primary {
   background: #155d42;
   border-color: #2a8e65;
@@ -165,7 +170,7 @@ h2 {
 }
 
 .dashboard-grid {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
   grid-template-areas:
     "telemetry path"
     "logs path";
@@ -187,6 +192,10 @@ h2 {
 
 .telemetry {
   grid-area: telemetry;
+  align-self: start;
+  justify-self: start;
+  width: min(100%, 300px);
+  padding: 10px;
 }
 
 .topics {
@@ -209,30 +218,34 @@ h2 {
 .telemetry dl {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin: 14px 0 0;
+  gap: 5px;
+  margin: 6px 0 0;
 }
 
 .telemetry dl > div {
-  min-height: 70px;
+  min-height: 34px;
   border: 1px solid color-mix(in srgb, var(--border), white 8%);
   border-radius: 6px;
-  padding: 11px 12px;
+  padding: 4px 6px;
   background: #141b18;
 }
 
 .telemetry dt {
   color: #c3d0c9;
-  font-size: 11px;
+  overflow: hidden;
+  font-size: 9px;
   font-weight: 700;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .telemetry dd {
-  margin: 6px 0 0;
+  margin: 2px 0 0;
   color: #ffffff;
-  font-size: 18px;
+  font-size: 13px;
   font-weight: 800;
-  line-height: 1.15;
+  line-height: 1.1;
   overflow-wrap: anywhere;
 }
 
@@ -501,6 +514,58 @@ h2 {
 .bag-topic-message.bad {
   border-color: rgba(255, 112, 112, 0.55);
   color: #ffb6b6;
+}
+
+.analysis-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.analysis-summary div,
+.analysis-message {
+  min-height: 58px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  background: #141b18;
+}
+
+.analysis-summary span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.analysis-summary strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.analysis-message {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+.analysis-message.bad {
+  border-color: rgba(255, 112, 112, 0.55);
+  color: #ffb6b6;
+}
+
+.analysis-canvas {
+  width: 100%;
+  height: 320px;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0b0f0e;
+}
+
+#bag-analysis-output {
+  max-height: 220px;
 }
 
 #dvl-config-json,
@@ -1229,6 +1294,7 @@ pre {
   .dvl-command-grid,
   .dvl-config,
   .control-layout,
+  .analysis-summary,
   .bag-status,
   .bag-topic-list,
   .ekf-diagonal,
@@ -1260,6 +1326,7 @@ pre {
   .control-enable-row,
   .control-sliders,
   .control-command-grid,
+  .analysis-summary,
   .bag-status,
   .bag-topic-list,
   .ekf-diagonal,
@@ -1274,6 +1341,10 @@ pre {
     grid-auto-flow: row;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     width: 100%;
+  }
+
+  .telemetry dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .ps4-shoulders {
