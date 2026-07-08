@@ -20,6 +20,9 @@ from kmu26_auv_web_gui.bag_analyzer import write_analysis_artifacts
 from kmu26_auv_web_gui.ekf_config import read_process_noise_covariance
 from kmu26_auv_web_gui.ekf_config import write_process_noise_covariance
 from kmu26_auv_web_gui.process_manager import ProcessManager
+from kmu26_auv_web_gui.ros_interface import ATTITUDE_MAX_TILT_DEG
+from kmu26_auv_web_gui.ros_interface import READY_MODES
+from kmu26_auv_web_gui.ros_interface import STILLNESS_MAX_SPEED_MPS
 from kmu26_auv_web_gui.ros_interface import RosInterface
 
 
@@ -42,6 +45,10 @@ DEFAULT_BAG_TOPICS = [
     "/tf_static",
 ]
 
+OPTIONAL_BAG_TOPICS = [
+    "/joy/set_feedback",
+]
+
 ALLOWED_DVL_COMMANDS = {
     "calibrate_gyro",
     "get_config",
@@ -53,6 +60,7 @@ ALLOWED_DVL_PARAMETERS = {
     "",
     "acoustic_enabled",
     "dark_mode_enabled",
+    "mounting_rotation_offset",
     "mountig_rotation_offset",
     "range_mode",
     "speed_of_sound",
@@ -87,6 +95,10 @@ def create_app(
         dronecan_python=dronecan_python,
     )
     ros_interface = RosInterface()
+    bag_selection: dict[str, object] = {
+        "record_all": False,
+        "topics": list(DEFAULT_BAG_TOPICS),
+    }
     web_dir_override = os.environ.get("KMU26_WEB_GUI_WEB_DIR")
     if web_dir_override:
         web_dir = Path(web_dir_override)
@@ -196,6 +208,25 @@ def create_app(
         payload["test"] = test
         return payload
 
+    @app.post("/api/test/stop")
+    def stop_localization_test() -> dict:
+        try:
+            process_manager.stop_bag()
+            process_manager.stop_stack()
+            ros_interface.clear_path()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = _status(process_manager, ros_interface)
+        payload["test"] = {
+            "message": "Idle",
+            "steps": [
+                {"name": "bag", "status": "ok", "detail": "stopped"},
+                {"name": "stack", "status": "ok", "detail": "stopped"},
+                {"name": "path", "status": "ok", "detail": "cleared"},
+            ],
+        }
+        return payload
+
     @app.post("/api/control/enable")
     async def set_control_enabled(request: Request) -> dict:
         body = await _json_or_empty(request)
@@ -245,9 +276,12 @@ def create_app(
     @app.post("/api/bag/start")
     async def start_bag(request: Request) -> dict:
         body = await _json_or_empty(request)
-        record_all = bool(body.get("record_all", False))
-        topics = body.get("topics") or DEFAULT_BAG_TOPICS
-        output_dir = process_manager.start_bag(topics, record_all=record_all)
+        try:
+            topics, record_all = _bag_record_options(body)
+            _save_bag_selection(bag_selection, topics, record_all)
+            output_dir = process_manager.start_bag(topics, record_all=record_all)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         payload = _status(process_manager, ros_interface)
         payload["bag_output"] = output_dir
         return payload
@@ -263,11 +297,32 @@ def create_app(
             active_topics = process_manager.list_topics()
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        topics = sorted(set(DEFAULT_BAG_TOPICS) | set(active_topics))
+        topics = sorted(
+            set(DEFAULT_BAG_TOPICS)
+            | set(OPTIONAL_BAG_TOPICS)
+            | set(active_topics)
+            | set(bag_selection["topics"])
+        )
         return {
             "default_topics": DEFAULT_BAG_TOPICS,
+            "optional_topics": OPTIONAL_BAG_TOPICS,
             "active_topics": active_topics,
+            "selected_topics": list(bag_selection["topics"]),
+            "record_all": bool(bag_selection["record_all"]),
             "topics": topics,
+        }
+
+    @app.post("/api/bag/selection")
+    async def save_bag_selection(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        try:
+            topics, record_all = _bag_record_options(body)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _save_bag_selection(bag_selection, topics, record_all)
+        return {
+            "record_all": bool(bag_selection["record_all"]),
+            "topics": list(bag_selection["topics"]),
         }
 
     @app.post("/api/bag/analyze")
@@ -327,13 +382,7 @@ def _run_localization_test(
         raise RuntimeError("launch_args must be an object")
     launch_args = {str(key): str(value) for key, value in launch_args.items()}
 
-    topics = body.get("topics") or DEFAULT_BAG_TOPICS
-    if not isinstance(topics, list):
-        raise RuntimeError("topics must be a list")
-
-    record_all = bool(body.get("record_all", False))
     steps: list[dict[str, str]] = []
-    bag_output = process_manager.status().get("bag_output", "")
 
     if process_manager.stack_running:
         _append_test_step(steps, "stack", "skipped", "already running")
@@ -352,12 +401,9 @@ def _run_localization_test(
         raise RuntimeError("DVL command subscriber was not discovered")
     _append_test_step(steps, "dvl_command", "ok", f"{subscriber_count} subscriber(s)")
 
-    if process_manager.status().get("bag_running"):
-        _append_test_step(steps, "bag", "skipped", bag_output or "already recording")
-    else:
-        bag_output = process_manager.start_bag(topics, record_all=record_all)
-        _append_test_step(steps, "bag", "ok", bag_output)
-        time.sleep(0.7)
+    ros_interface.neutralize_web_control()
+    _append_test_step(steps, "web_control", "ok", "neutral burst sent")
+    time.sleep(0.3)
 
     _send_dvl_command_step(
         ros_interface,
@@ -377,8 +423,16 @@ def _run_localization_test(
     time.sleep(0.25)
     _send_dvl_command_step(ros_interface, steps, "get_config")
     time.sleep(0.25)
+
+    _require_mode_ready(ros_interface, steps)
+    _require_attitude_level(ros_interface, steps)
+    _require_dvl_good(ros_interface, steps, "dvl_good_before_reset")
+    _require_vehicle_still(ros_interface, steps)
+
     _send_dvl_command_step(ros_interface, steps, "reset_dead_reckoning")
-    time.sleep(1.0)
+    time.sleep(0.25)
+    _require_dvl_good(ros_interface, steps, "dvl_good_after_reset")
+    _require_topic_alive(ros_interface, steps, "depth", "depth_fresh", timeout=5.0)
 
     previous_pose = ros_interface.status().get("pose", {})
     restart = process_manager.restart_localization_filter()
@@ -398,7 +452,6 @@ def _run_localization_test(
     warning = next((step["detail"] for step in steps if step["status"] == "warn"), "")
     return {
         "message": f"Ready with warning: {warning}" if warning else "Ready",
-        "bag_output": bag_output,
         "origin": {
             "method": "test_sequence_restart_then_set_pose",
             "previous_pose": previous_pose,
@@ -408,6 +461,29 @@ def _run_localization_test(
         },
         "steps": steps,
     }
+
+
+def _bag_record_options(
+    body: dict,
+    include_default_topics: bool = False,
+) -> tuple[list[str], bool]:
+    record_all = bool(body.get("record_all", False))
+    raw_topics = body["topics"] if "topics" in body else DEFAULT_BAG_TOPICS
+    if not isinstance(raw_topics, list):
+        raise RuntimeError("topics must be a list")
+    topics = [str(topic).strip() for topic in raw_topics if str(topic).strip()]
+    if include_default_topics:
+        topics = list(dict.fromkeys([*DEFAULT_BAG_TOPICS, *topics]))
+    return topics, record_all
+
+
+def _save_bag_selection(
+    bag_selection: dict[str, object],
+    topics: list[str],
+    record_all: bool,
+) -> None:
+    bag_selection["record_all"] = record_all
+    bag_selection["topics"] = list(dict.fromkeys(topics))
 
 
 def _append_test_step(
@@ -458,6 +534,109 @@ def _send_dvl_command_step(
     if parameter_value:
         detail = f"{detail}={parameter_value}" if detail else parameter_value
     _append_test_step(steps, f"dvl_{command}", "ok", detail)
+
+
+def _require_dvl_good(
+    ros_interface: RosInterface,
+    steps: list[dict[str, str]],
+    name: str,
+) -> None:
+    ok, snapshot = ros_interface.wait_for_dvl_good(duration_s=2.0, timeout_s=10.0)
+    detail = _dvl_quality_detail(snapshot)
+    if not ok:
+        _append_test_step(steps, name, "bad", detail)
+        raise RuntimeError(f"{name} failed: {detail}")
+    _append_test_step(steps, name, "ok", detail)
+
+
+def _require_attitude_level(
+    ros_interface: RosInterface,
+    steps: list[dict[str, str]],
+) -> None:
+    ok, snapshot = ros_interface.wait_for_attitude_level(
+        duration_s=1.0,
+        timeout_s=5.0,
+        max_tilt_deg=ATTITUDE_MAX_TILT_DEG,
+    )
+    tilt = snapshot.get("recent_max_tilt_deg", snapshot.get("tilt_deg"))
+    detail = (
+        f"tilt={float(tilt):.1f} deg"
+        if isinstance(tilt, (int, float))
+        else str(snapshot.get("reason", "no attitude"))
+    )
+    if not ok:
+        _append_test_step(steps, "attitude", "bad", detail)
+        raise RuntimeError(f"attitude precheck failed: {detail}")
+    _append_test_step(steps, "attitude", "ok", detail)
+
+
+def _require_mode_ready(
+    ros_interface: RosInterface,
+    steps: list[dict[str, str]],
+) -> None:
+    ok, snapshot = ros_interface.wait_for_mode_ready(READY_MODES, timeout_s=3.0)
+    detail = f"mode={snapshot.get('mode') or '--'}"
+    if not ok:
+        reason = str(snapshot.get("reason", detail))
+        _append_test_step(steps, "mode", "bad", reason)
+        raise RuntimeError(f"mode precheck failed: {reason}")
+    _append_test_step(steps, "mode", "ok", detail)
+
+
+def _require_vehicle_still(
+    ros_interface: RosInterface,
+    steps: list[dict[str, str]],
+) -> None:
+    ok, snapshot = ros_interface.wait_for_vehicle_still(
+        duration_s=1.0,
+        timeout_s=5.0,
+        max_speed_mps=STILLNESS_MAX_SPEED_MPS,
+    )
+    speed = snapshot.get("recent_max_speed_mps")
+    detail = (
+        f"speed<={float(speed):.3f} m/s"
+        if isinstance(speed, (int, float))
+        else str(snapshot.get("reason", "no speed"))
+    )
+    if not ok:
+        _append_test_step(steps, "stillness", "bad", detail)
+        raise RuntimeError(f"stillness precheck failed: {detail}")
+    _append_test_step(steps, "stillness", "ok", detail)
+
+
+def _require_topic_alive(
+    ros_interface: RosInterface,
+    steps: list[dict[str, str]],
+    topic_key: str,
+    step_name: str,
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    snapshot = {}
+    while time.monotonic() < deadline:
+        snapshot = ros_interface.status().get("topics", {}).get(topic_key, {})
+        if snapshot.get("alive"):
+            _append_test_step(steps, step_name, "ok", f"age={float(snapshot.get('age', 0.0)):.2f}s")
+            return
+        time.sleep(0.05)
+    detail = str(snapshot.get("name", topic_key)) + " stale"
+    _append_test_step(steps, step_name, "bad", detail)
+    raise RuntimeError(f"{step_name} failed: {detail}")
+
+
+def _dvl_quality_detail(snapshot: dict) -> str:
+    reason = str(snapshot.get("reason", "DVL status unknown"))
+    fom = snapshot.get("fom")
+    altitude = snapshot.get("altitude")
+    beams = snapshot.get("valid_beams")
+    parts = [reason]
+    if isinstance(fom, (int, float)):
+        parts.append(f"fom={fom:.3f}")
+    if isinstance(altitude, (int, float)):
+        parts.append(f"alt={altitude:.2f}m")
+    if isinstance(beams, (int, float)):
+        parts.append(f"beams={int(beams)}")
+    return ", ".join(parts)
 
 
 def _analyze_and_write_bag(bag_path: str) -> dict:

@@ -12,6 +12,7 @@ const state = {
     error: "",
     defaultTopics: [],
     topics: [],
+    selectedTopics: [],
     analysis: {
       running: false,
       result: null,
@@ -20,6 +21,7 @@ const state = {
   },
   test: {
     running: false,
+    stopping: false,
     message: "Idle",
     steps: [],
   },
@@ -52,6 +54,7 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const BAG_SELECTION_KEY = "kmu26-auv-web-gui-bag-selection";
 
 function fmt(value, digits = 2) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "--";
@@ -144,11 +147,20 @@ function bindControls() {
   $("bag-refresh-topics").addEventListener("click", () => {
     loadBagTopics().catch(showError);
   });
+  document.querySelectorAll('input[name="bag-mode"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      rememberBagTopicSelection();
+      saveBagSelection().catch(showError);
+    });
+  });
   $("analyze-bag").addEventListener("click", () => {
     analyzeBag().catch(showError);
   });
   $("test-start").addEventListener("click", () => {
     runLocalizationTest().catch(showError);
+  });
+  $("test-stop").addEventListener("click", () => {
+    stopLocalizationTest().catch(showError);
   });
 
   document.querySelectorAll("[data-dvl-command]").forEach((button) => {
@@ -224,6 +236,9 @@ function renderStatus(payload) {
   const pose = ros.pose || {};
   const velocity = ros.velocity || {};
   const depth = ros.depth || {};
+  const dvlQuality = ros.dvl_quality || {};
+  const attitude = ros.attitude || {};
+  const precheck = ros.precheck || {};
   const battery = ros.battery || {};
   const mavrosState = ros.mavros_state || {};
   const joy = ros.joy || {};
@@ -241,6 +256,9 @@ function renderStatus(payload) {
   $("yaw-value").textContent = `${fmt((pose.yaw || 0) * 180 / Math.PI, 1)} deg`;
   $("velocity-value").textContent = `${fmt(velocity.x)}, ${fmt(velocity.y)}, ${fmt(velocity.z)}`;
   $("depth-value").textContent = `${fmt(depth.z)} m`;
+  renderDvlQuality(dvlQuality, precheck);
+  renderAttitude(attitude, precheck);
+  renderPrecheck(precheck);
   $("battery-voltage").textContent = fmtUnit(battery.voltage, "V");
   $("battery-current").textContent = fmtUnit(battery.current, "A");
   $("battery-soc").textContent =
@@ -263,6 +281,32 @@ function renderStatus(payload) {
   };
   renderPath();
   $("log-output").textContent = (process.logs || []).join("\n");
+}
+
+function renderDvlQuality(dvlQuality, precheck) {
+  const dvlGood = precheck.dvl_good || {};
+  const good = Boolean(dvlGood.ok ?? dvlQuality.good);
+  const reason = dvlGood.reason || dvlQuality.reason || "--";
+  const fom = typeof dvlQuality.fom === "number" ? `FOM ${fmt(dvlQuality.fom, 3)}` : "";
+  const beams = typeof dvlQuality.valid_beams === "number" ? `${dvlQuality.valid_beams} beams` : "";
+  const label = good ? ["GOOD", fom, beams].filter(Boolean).join(" · ") : reason;
+  setTelemetryState("dvl-quality-value", label || "--", good ? "good" : "warn");
+}
+
+function renderAttitude(attitude, precheck) {
+  const level = precheck.attitude_level || {};
+  const tilt = typeof attitude.tilt_deg === "number" ? attitude.tilt_deg : level.tilt_deg;
+  const ok = Boolean(level.ok);
+  const label = typeof tilt === "number" ? `${fmt(tilt, 1)} deg` : level.reason || "--";
+  setTelemetryState("attitude-tilt-value", label, ok ? "good" : "warn");
+}
+
+function renderPrecheck(precheck) {
+  const ready = Boolean(precheck.ready);
+  const mode = precheck.mode_ready?.mode || "--";
+  const still = precheck.vehicle_still?.ok ? "still" : precheck.vehicle_still?.reason || "moving?";
+  const label = ready ? `READY · ${mode}` : `BLOCKED · ${mode} · ${still}`;
+  setTelemetryState("precheck-ready-value", label, ready ? "good" : "warn");
 }
 
 function bindWebControl() {
@@ -539,9 +583,22 @@ async function loadBagTopics() {
   renderBagTopics();
   try {
     const payload = await getJson("/api/bag/topics");
+    const savedSelection = loadStoredBagSelection();
     state.bag.defaultTopics = payload.default_topics || [];
     state.bag.topics = payload.topics || [];
+    state.bag.selectedTopics = Array.from(
+      new Set([
+        ...(payload.selected_topics || []),
+        ...(savedSelection.topics || []),
+        ...(state.bag.selectedTopics || []),
+      ]),
+    );
     state.bag.topicsLoaded = true;
+    setBagMode(
+      typeof savedSelection.record_all === "boolean"
+        ? savedSelection.record_all
+        : Boolean(payload.record_all),
+    );
   } catch (error) {
     state.bag.error = error.message;
     throw error;
@@ -566,30 +623,93 @@ function renderBagTopics() {
   }
 
   const defaults = new Set(state.bag.defaultTopics);
+  const selected = new Set(state.bag.selectedTopics);
   $("bag-topic-list").innerHTML = state.bag.topics
     .map((topic) => {
-      const checked = defaults.has(topic) ? "checked" : "";
+      const checked = defaults.has(topic) || selected.has(topic) ? "checked" : "";
+      const safeTopic = escapeHtml(topic);
       return `
         <label>
-          <input type="checkbox" value="${topic}" ${checked} />
-          <span>${topic}</span>
+          <input type="checkbox" value="${safeTopic}" ${checked} />
+          <span>${safeTopic}</span>
         </label>`;
     })
     .join("");
+  document.querySelectorAll("#bag-topic-list input").forEach((input) => {
+    input.addEventListener("change", () => {
+      rememberBagTopicSelection();
+      saveBagSelection().catch(showError);
+    });
+  });
 }
 
-async function startBag() {
+function setBagMode(recordAll) {
+  const mode = recordAll ? "all" : "selected";
+  const input = document.querySelector(`input[name="bag-mode"][value="${mode}"]`);
+  if (input) input.checked = true;
+}
+
+function rememberBagTopicSelection() {
+  state.bag.selectedTopics = Array.from(
+    document.querySelectorAll("#bag-topic-list input:checked"),
+  ).map((input) => input.value);
+}
+
+async function saveBagSelection() {
+  const mode = document.querySelector('input[name="bag-mode"]:checked')?.value || "selected";
+  const selection = {
+    record_all: mode === "all",
+    topics: state.bag.selectedTopics,
+  };
+  storeBagSelection(selection);
+  await postJson("/api/bag/selection", selection);
+}
+
+function loadStoredBagSelection() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(BAG_SELECTION_KEY) || "{}");
+    return {
+      record_all: typeof saved.record_all === "boolean" ? saved.record_all : undefined,
+      topics: Array.isArray(saved.topics) ? saved.topics : [],
+    };
+  } catch (_) {
+    return { topics: [] };
+  }
+}
+
+function storeBagSelection(selection) {
+  try {
+    localStorage.setItem(BAG_SELECTION_KEY, JSON.stringify(selection));
+  } catch (_) {
+    // The server-side selection still updates when browser storage is unavailable.
+  }
+}
+
+async function currentBagSelection({ includeDefaultTopics = false } = {}) {
   if (!state.bag.topicsLoaded) {
     await loadBagTopics();
   }
   const mode = document.querySelector('input[name="bag-mode"]:checked')?.value || "selected";
   const recordAll = mode === "all";
-  const topics = Array.from(document.querySelectorAll("#bag-topic-list input:checked")).map(
-    (input) => input.value,
-  );
-  await postJson("/api/bag/start", {
+  rememberBagTopicSelection();
+  await saveBagSelection();
+  const selectedTopics = state.bag.selectedTopics;
+  const topics = includeDefaultTopics
+    ? Array.from(new Set([...state.bag.defaultTopics, ...selectedTopics]))
+    : selectedTopics;
+  if (!recordAll && topics.length === 0) {
+    throw new Error("Select at least one rosbag topic.");
+  }
+  return {
     record_all: recordAll,
     topics,
+  };
+}
+
+async function startBag() {
+  const bagSelection = await currentBagSelection();
+  await postJson("/api/bag/start", {
+    ...bagSelection,
   });
 }
 
@@ -795,9 +915,30 @@ async function runLocalizationTest() {
   }
 }
 
+async function stopLocalizationTest() {
+  state.test.stopping = true;
+  state.test.message = "Stopping";
+  renderTestState();
+  try {
+    const payload = await postJson("/api/test/stop", {});
+    const test = payload.test || {};
+    state.test.message = test.message || "Idle";
+    state.test.steps = test.steps || [];
+    renderStatus(payload);
+  } catch (error) {
+    state.test.message = "Stop failed";
+    throw error;
+  } finally {
+    state.test.running = false;
+    state.test.stopping = false;
+    renderTestState();
+  }
+}
+
 function renderTestState() {
   $("test-state").textContent = state.test.running ? "Running" : state.test.message;
-  $("test-start").disabled = state.test.running;
+  $("test-start").disabled = state.test.running || state.test.stopping;
+  $("test-stop").disabled = state.test.stopping;
 }
 
 function renderDvl(config, events) {

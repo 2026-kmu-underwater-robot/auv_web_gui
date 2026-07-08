@@ -53,6 +53,18 @@
               <dd id="velocity-value">0.00, 0.00, 0.00</dd>
             </div>
             <div>
+              <dt>DVL Quality</dt>
+              <dd id="dvl-quality-value">--</dd>
+            </div>
+            <div>
+              <dt>Tilt</dt>
+              <dd id="attitude-tilt-value">--</dd>
+            </div>
+            <div>
+              <dt>Test Ready</dt>
+              <dd id="precheck-ready-value">--</dd>
+            </div>
+            <div>
               <dt>Depth Z</dt>
               <dd id="depth-value">0.00 m</dd>
             </div>
@@ -162,6 +174,7 @@
             <h2>DVL Commands</h2>
             <div class="dvl-command-grid">
               <button id="test-start" class="primary">Run Test</button>
+              <button id="test-stop" class="danger">Stop</button>
               <button data-dvl-command="get_config">Get Config</button>
               <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="true">Acoustic On</button>
               <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="false">Acoustic Off</button>
@@ -427,6 +440,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260701-test-stop-no-auto-bag"></script>
   </body>
 </html>

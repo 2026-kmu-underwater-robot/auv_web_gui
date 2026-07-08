@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 import rclpy
+from dvl_msgs.msg import DVL
 from dvl_msgs.msg import CommandResponse
 from dvl_msgs.msg import ConfigCommand
 from dvl_msgs.msg import ConfigStatus
@@ -27,12 +28,33 @@ from sensor_msgs.msg import Joy
 PATH_MIN_DISTANCE_M = 0.01
 WEB_CONTROL_TIMEOUT_S = 0.35
 WEB_CONTROL_PERIOD_S = 0.05
+DVL_MAX_FOM = 0.05
+DVL_MIN_ALTITUDE_M = 0.05
+DVL_MIN_VALID_BEAMS = 4
+DVL_TWIST_STALE_AFTER_S = 0.75
+ATTITUDE_MAX_TILT_DEG = 10.0
+STILLNESS_MAX_SPEED_MPS = 0.05
+READY_MODES = {"ALT_HOLD", "POSHOLD", "GUIDED"}
 
 
 def _yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _rpy_from_quaternion(x: float, y: float, z: float, w: float) -> tuple[float, float, float]:
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    return roll, pitch, _yaw_from_quaternion(x, y, z, w)
 
 
 def _quaternion_from_yaw(yaw: float) -> dict[str, float]:
@@ -47,6 +69,18 @@ def _quaternion_from_yaw(yaw: float) -> dict[str, float]:
 
 def _finite_or_none(value: float) -> float | None:
     return value if math.isfinite(value) else None
+
+
+def _dvl_quality_state(msg: DVL, valid_beams: int) -> tuple[bool, str]:
+    if not bool(msg.velocity_valid):
+        return False, "velocity invalid"
+    if not math.isfinite(float(msg.fom)) or float(msg.fom) > DVL_MAX_FOM:
+        return False, f"FOM {float(msg.fom):.3f} > {DVL_MAX_FOM:.3f}"
+    if not math.isfinite(float(msg.altitude)) or float(msg.altitude) < DVL_MIN_ALTITUDE_M:
+        return False, f"altitude {float(msg.altitude):.2f} m < {DVL_MIN_ALTITUDE_M:.2f} m"
+    if valid_beams < DVL_MIN_VALID_BEAMS:
+        return False, f"{valid_beams} valid beams < {DVL_MIN_VALID_BEAMS}"
+    return True, "DVL good"
 
 
 @dataclass
@@ -85,6 +119,7 @@ class LocalizationRosNode(Node):
         self._health = {
             "odom": TopicHealth("/odometry/filtered"),
             "dvl": TopicHealth("/dvl/twist"),
+            "dvl_data": TopicHealth("/dvl/data"),
             "depth": TopicHealth("/depth/pose"),
             "imu": TopicHealth("/mavros/imu/data"),
             "mavros_state": TopicHealth("/mavros/state", stale_after=2.0),
@@ -94,6 +129,26 @@ class LocalizationRosNode(Node):
         self._pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
         self._velocity = {"x": 0.0, "y": 0.0, "z": 0.0}
         self._depth = {"z": 0.0}
+        self._attitude = {
+            "roll_deg": None,
+            "pitch_deg": None,
+            "yaw_deg": None,
+            "tilt_deg": None,
+            "updated_at": "",
+        }
+        self._dvl_quality = {
+            "good": False,
+            "reason": "no DVL data",
+            "velocity_valid": False,
+            "fom": None,
+            "altitude": None,
+            "valid_beams": 0,
+            "speed": None,
+            "updated_at": "",
+        }
+        self._dvl_quality_samples: deque[dict] = deque(maxlen=240)
+        self._tilt_samples: deque[dict] = deque(maxlen=240)
+        self._dvl_twist_samples: deque[dict] = deque(maxlen=240)
         self._battery = {
             "voltage": None,
             "current": None,
@@ -141,6 +196,7 @@ class LocalizationRosNode(Node):
         self._set_pose_client = self.create_client(SetPose, "/set_pose")
         self.create_subscription(Odometry, "/odometry/filtered", self._on_odom, sensor_qos)
         self.create_subscription(TwistWithCovarianceStamped, "/dvl/twist", self._on_dvl, sensor_qos)
+        self.create_subscription(DVL, "/dvl/data", self._on_dvl_data, sensor_qos)
         self.create_subscription(CommandResponse, "/dvl/command/response", self._on_dvl_response, sensor_qos)
         self.create_subscription(ConfigStatus, "/dvl/config/status", self._on_dvl_config, sensor_qos)
         self.create_subscription(PoseWithCovarianceStamped, "/depth/pose", self._on_depth, sensor_qos)
@@ -177,6 +233,9 @@ class LocalizationRosNode(Node):
                 "pose": dict(self._pose),
                 "velocity": dict(self._velocity),
                 "depth": dict(self._depth),
+                "attitude": dict(self._attitude),
+                "dvl_quality": dict(self._dvl_quality),
+                "precheck": self._precheck_snapshot_locked(),
                 "battery": dict(self._battery),
                 "joy": {
                     "axes": list(self._joy["axes"]),
@@ -209,6 +268,76 @@ class LocalizationRosNode(Node):
                 return True
             time.sleep(0.05)
         return False
+
+    def wait_for_dvl_good(self, duration_s: float = 2.0, timeout_s: float = 10.0) -> tuple[bool, dict]:
+        deadline = time.monotonic() + timeout_s
+        last_snapshot = {}
+        while time.monotonic() < deadline:
+            with self._lock:
+                ok, snapshot = self._dvl_good_window_locked(duration_s)
+                last_snapshot = snapshot
+            if ok:
+                return True, snapshot
+            time.sleep(0.05)
+        with self._lock:
+            ok, snapshot = self._dvl_good_window_locked(duration_s)
+        return ok, snapshot or last_snapshot
+
+    def wait_for_attitude_level(
+        self,
+        duration_s: float = 1.0,
+        timeout_s: float = 5.0,
+        max_tilt_deg: float = ATTITUDE_MAX_TILT_DEG,
+    ) -> tuple[bool, dict]:
+        deadline = time.monotonic() + timeout_s
+        last_snapshot = {}
+        while time.monotonic() < deadline:
+            with self._lock:
+                ok, snapshot = self._attitude_level_window_locked(duration_s, max_tilt_deg)
+                last_snapshot = snapshot
+            if ok:
+                return True, snapshot
+            time.sleep(0.05)
+        with self._lock:
+            ok, snapshot = self._attitude_level_window_locked(duration_s, max_tilt_deg)
+        return ok, snapshot or last_snapshot
+
+    def wait_for_mode_ready(
+        self,
+        allowed_modes: set[str] | None = None,
+        timeout_s: float = 3.0,
+    ) -> tuple[bool, dict]:
+        allowed = allowed_modes or READY_MODES
+        deadline = time.monotonic() + timeout_s
+        snapshot = {}
+        while time.monotonic() < deadline:
+            with self._lock:
+                snapshot = self._mode_snapshot_locked(allowed)
+            if snapshot["ok"]:
+                return True, snapshot
+            time.sleep(0.05)
+        with self._lock:
+            snapshot = self._mode_snapshot_locked(allowed)
+        return bool(snapshot.get("ok")), snapshot
+
+    def wait_for_vehicle_still(
+        self,
+        duration_s: float = 1.0,
+        timeout_s: float = 5.0,
+        max_speed_mps: float = STILLNESS_MAX_SPEED_MPS,
+    ) -> tuple[bool, dict]:
+        deadline = time.monotonic() + timeout_s
+        last_snapshot = {}
+        while time.monotonic() < deadline:
+            with self._lock:
+                ok, snapshot = self._still_window_locked(duration_s, max_speed_mps)
+                last_snapshot = snapshot
+            if ok:
+                return True, snapshot
+            time.sleep(0.05)
+        with self._lock:
+            ok, snapshot = self._still_window_locked(duration_s, max_speed_mps)
+        return ok, snapshot or last_snapshot
 
     def set_localization_origin(self) -> dict:
         now = time.monotonic()
@@ -281,6 +410,22 @@ class LocalizationRosNode(Node):
             self._web_control["last_command"] = time.monotonic()
             if not enabled:
                 self._web_control["neutral_burst"] = 8
+
+    def neutralize_web_control(self, burst_count: int = 10) -> None:
+        with self._lock:
+            self._web_control["enabled"] = False
+            self._web_control["active"] = False
+            self._web_control["axes"] = {
+                "forward": 0.0,
+                "lateral": 0.0,
+                "vertical": 0.0,
+                "yaw": 0.0,
+            }
+            self._web_control["last_command"] = time.monotonic()
+            self._web_control["neutral_burst"] = max(
+                int(self._web_control["neutral_burst"]),
+                int(burst_count),
+            )
 
     def update_web_control_command(self, axes: dict, active: bool) -> None:
         clean_axes = {
@@ -389,9 +534,36 @@ class LocalizationRosNode(Node):
 
     def _on_dvl(self, msg: TwistWithCovarianceStamped) -> None:
         linear = msg.twist.twist.linear
+        speed = math.sqrt(linear.x * linear.x + linear.y * linear.y + linear.z * linear.z)
         with self._lock:
             self._health["dvl"].tick()
             self._velocity = {"x": linear.x, "y": linear.y, "z": linear.z}
+            if math.isfinite(speed):
+                self._dvl_twist_samples.append({"t": time.monotonic(), "speed": speed})
+
+    def _on_dvl_data(self, msg: DVL) -> None:
+        velocity = msg.velocity
+        speed = math.sqrt(
+            velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z)
+        valid_beams = sum(1 for beam in msg.beams if bool(beam.valid))
+        good, reason = _dvl_quality_state(msg, valid_beams)
+        sample = {
+            "t": time.monotonic(),
+            "good": good,
+            "reason": reason,
+            "velocity_valid": bool(msg.velocity_valid),
+            "fom": _finite_or_none(float(msg.fom)),
+            "altitude": _finite_or_none(float(msg.altitude)),
+            "valid_beams": valid_beams,
+            "speed": _finite_or_none(speed),
+        }
+        with self._lock:
+            self._health["dvl_data"].tick()
+            self._dvl_quality = {
+                **{key: value for key, value in sample.items() if key != "t"},
+                "updated_at": time.strftime("%H:%M:%S"),
+            }
+            self._dvl_quality_samples.append(sample)
 
     def _on_dvl_response(self, msg: CommandResponse) -> None:
         self._append_dvl_event(
@@ -457,9 +629,27 @@ class LocalizationRosNode(Node):
             }
 
     def _on_imu(self, msg: Imu) -> None:
-        del msg
+        orientation = msg.orientation
+        roll, pitch, yaw = _rpy_from_quaternion(
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w,
+        )
+        roll_deg = math.degrees(roll)
+        pitch_deg = math.degrees(pitch)
+        yaw_deg = math.degrees(yaw)
+        tilt_deg = math.degrees(math.hypot(roll, pitch))
         with self._lock:
             self._health["imu"].tick()
+            self._attitude = {
+                "roll_deg": roll_deg,
+                "pitch_deg": pitch_deg,
+                "yaw_deg": yaw_deg,
+                "tilt_deg": tilt_deg,
+                "updated_at": time.strftime("%H:%M:%S"),
+            }
+            self._tilt_samples.append({"t": time.monotonic(), "tilt_deg": tilt_deg})
 
     def _on_joy(self, msg: Joy) -> None:
         with self._lock:
@@ -490,6 +680,135 @@ class LocalizationRosNode(Node):
                     "error_message": error_message,
                 }
             )
+
+    def _precheck_snapshot_locked(self) -> dict:
+        dvl_ok, dvl = self._dvl_good_window_locked(2.0)
+        attitude_ok, attitude = self._attitude_level_window_locked(1.0, ATTITUDE_MAX_TILT_DEG)
+        still_ok, still = self._still_window_locked(1.0, STILLNESS_MAX_SPEED_MPS)
+        mode = self._mode_snapshot_locked(READY_MODES)
+        return {
+            "ready": dvl_ok and attitude_ok and mode["ok"] and still_ok,
+            "dvl_good": dvl,
+            "attitude_level": attitude,
+            "mode_ready": mode,
+            "vehicle_still": still,
+        }
+
+    def _dvl_good_window_locked(self, duration_s: float) -> tuple[bool, dict]:
+        now = time.monotonic()
+        recent = [
+            sample for sample in self._dvl_quality_samples
+            if now - float(sample["t"]) <= max(duration_s, 0.0)
+        ]
+        twist_age = self._health["dvl"].snapshot()["age"]
+        latest = dict(self._dvl_quality)
+        latest["twist_age"] = twist_age
+        if not recent:
+            latest["ok"] = False
+            latest["reason"] = latest.get("reason") or "no recent DVL data"
+            return False, latest
+        window_start = now - duration_s
+        has_full_window = (now - float(recent[0]["t"])) >= max(
+            0.0, duration_s - DVL_TWIST_STALE_AFTER_S)
+        latest_is_fresh = now - recent[-1]["t"] <= DVL_TWIST_STALE_AFTER_S
+        twist_is_fresh = twist_age is not None and twist_age <= DVL_TWIST_STALE_AFTER_S
+        all_good = all(bool(sample["good"]) for sample in recent)
+        ok = has_full_window and latest_is_fresh and twist_is_fresh and all_good
+        if not ok:
+            if not has_full_window:
+                latest["reason"] = f"waiting for {duration_s:.1f}s DVL good window"
+            elif not latest_is_fresh:
+                latest["reason"] = "DVL raw data stale"
+            elif not twist_is_fresh:
+                latest["reason"] = "DVL twist stale"
+            elif not all_good:
+                latest["reason"] = recent[-1].get("reason", "DVL degraded")
+        latest["ok"] = ok
+        latest["duration_s"] = duration_s
+        return ok, latest
+
+    def _attitude_level_window_locked(
+        self,
+        duration_s: float,
+        max_tilt_deg: float,
+    ) -> tuple[bool, dict]:
+        now = time.monotonic()
+        recent = [
+            sample for sample in self._tilt_samples
+            if now - float(sample["t"]) <= max(duration_s, 0.0)
+        ]
+        latest = dict(self._attitude)
+        latest["max_tilt_deg"] = max_tilt_deg
+        if not recent:
+            latest["ok"] = False
+            latest["reason"] = "no recent IMU attitude"
+            return False, latest
+        has_full_window = (now - float(recent[0]["t"])) >= max(0.0, duration_s - 0.25)
+        max_recent_tilt = max(float(sample["tilt_deg"]) for sample in recent)
+        ok = has_full_window and max_recent_tilt <= max_tilt_deg
+        latest["ok"] = ok
+        latest["recent_max_tilt_deg"] = max_recent_tilt
+        latest["duration_s"] = duration_s
+        latest["reason"] = (
+            "level"
+            if ok
+            else (
+                f"waiting for {duration_s:.1f}s level attitude"
+                if not has_full_window
+                else f"tilt {max_recent_tilt:.1f} deg > {max_tilt_deg:.1f} deg"
+            )
+        )
+        return ok, latest
+
+    def _mode_snapshot_locked(self, allowed_modes: set[str]) -> dict:
+        topic = self._health["mavros_state"].snapshot()
+        mode = str(self._mavros_state.get("mode") or "")
+        ok = bool(topic["alive"]) and mode in allowed_modes
+        return {
+            "ok": ok,
+            "mode": mode,
+            "allowed_modes": sorted(allowed_modes),
+            "topic_alive": bool(topic["alive"]),
+            "reason": "mode ready" if ok else (
+                "mavros state stale" if not topic["alive"] else f"mode {mode or '--'} not allowed"
+            ),
+        }
+
+    def _still_window_locked(
+        self,
+        duration_s: float,
+        max_speed_mps: float,
+    ) -> tuple[bool, dict]:
+        now = time.monotonic()
+        recent = [
+            sample for sample in self._dvl_twist_samples
+            if now - float(sample["t"]) <= max(duration_s, 0.0)
+        ]
+        if not recent:
+            return False, {
+                "ok": False,
+                "reason": "no recent DVL twist speed",
+                "duration_s": duration_s,
+                "max_speed_mps": max_speed_mps,
+            }
+        has_full_window = (now - float(recent[0]["t"])) >= max(0.0, duration_s - 0.25)
+        max_recent_speed = max(float(sample["speed"]) for sample in recent)
+        ok = has_full_window and max_recent_speed <= max_speed_mps
+        return ok, {
+            "ok": ok,
+            "reason": (
+                "still"
+                if ok
+                else (
+                    f"waiting for {duration_s:.1f}s still window"
+                    if not has_full_window
+                    else f"DVL speed {max_recent_speed:.3f} m/s > {max_speed_mps:.3f} m/s"
+                )
+            ),
+            "duration_s": duration_s,
+            "max_speed_mps": max_speed_mps,
+            "recent_max_speed_mps": max_recent_speed,
+        }
 
 
 class RosInterface:
@@ -571,10 +890,53 @@ class RosInterface:
             raise RuntimeError("ROS interface is not running")
         return self.node.wait_for_odom_after(timestamp, timeout)
 
+    def wait_for_dvl_good(
+        self,
+        duration_s: float = 2.0,
+        timeout_s: float = 10.0,
+    ) -> tuple[bool, dict]:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.wait_for_dvl_good(duration_s, timeout_s)
+
+    def wait_for_attitude_level(
+        self,
+        duration_s: float = 1.0,
+        timeout_s: float = 5.0,
+        max_tilt_deg: float = ATTITUDE_MAX_TILT_DEG,
+    ) -> tuple[bool, dict]:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.wait_for_attitude_level(duration_s, timeout_s, max_tilt_deg)
+
+    def wait_for_mode_ready(
+        self,
+        allowed_modes: set[str] | None = None,
+        timeout_s: float = 3.0,
+    ) -> tuple[bool, dict]:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.wait_for_mode_ready(allowed_modes, timeout_s)
+
+    def wait_for_vehicle_still(
+        self,
+        duration_s: float = 1.0,
+        timeout_s: float = 5.0,
+        max_speed_mps: float = STILLNESS_MAX_SPEED_MPS,
+    ) -> tuple[bool, dict]:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.wait_for_vehicle_still(duration_s, timeout_s, max_speed_mps)
+
     def set_web_control_enabled(self, enabled: bool) -> None:
         if self.node is None:
             raise RuntimeError("ROS interface is not running")
         self.node.set_web_control_enabled(enabled)
+
+    def neutralize_web_control(self, burst_count: int = 10) -> None:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        self.node.neutralize_web_control(burst_count)
 
     def update_web_control_command(self, axes: dict, active: bool) -> None:
         if self.node is None:
