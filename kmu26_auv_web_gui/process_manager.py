@@ -149,6 +149,8 @@ class ProcessManager:
         self.logs: deque[str] = deque(maxlen=500)
         self._dronecan_allocator: ManagedProcess | None = None
         self._stack: ManagedProcess | None = None
+        self._vision_yolo: ManagedProcess | None = None
+        self._vision_mission: ManagedProcess | None = None
         self._pinger: ManagedProcess | None = None
         self._bag: ManagedProcess | None = None
         self._bag_output: str = ""
@@ -214,6 +216,46 @@ class ProcessManager:
         if self._stack:
             self._stack.stop()
         self._stop_orphaned_stack_groups()
+
+    def start_vision_yolo(self, launch_args: dict[str, str] | None = None) -> None:
+        if self.vision_yolo_running:
+            raise RuntimeError("vision YOLO detector is already running")
+        self._vision_yolo = ManagedProcess(
+            "vision_yolo",
+            _ros2_launch_command(
+                "auv_buoy_vision_control",
+                "laptop_yolo_detection.launch.py",
+                launch_args,
+            ),
+            self.logs,
+        )
+        self._vision_yolo.start()
+
+    def stop_vision_yolo(self) -> None:
+        if self._vision_yolo:
+            self._vision_yolo.stop()
+
+    def start_vision_mission(self, launch_args: dict[str, str] | None = None) -> None:
+        if self.vision_mission_running:
+            raise RuntimeError("vision mission controller is already running")
+        self._vision_mission = ManagedProcess(
+            "vision_mission",
+            _ros2_launch_command(
+                "auv_buoy_vision_control",
+                "auv_bbox_controller.launch.py",
+                launch_args,
+            ),
+            self.logs,
+        )
+        self._vision_mission.start()
+
+    def stop_vision_mission(self) -> None:
+        if self._vision_mission:
+            self._vision_mission.stop()
+
+    def stop_vision(self) -> None:
+        self.stop_vision_mission()
+        self.stop_vision_yolo()
 
     def restart_localization_filter(self) -> dict:
         groups = self._stack_process_groups()
@@ -314,6 +356,8 @@ class ProcessManager:
             "dronecan_allocator_enabled": self.start_dronecan_allocator_on_startup,
             "dronecan_allocator_running": self.dronecan_allocator_running,
             "stack_running": self.stack_running,
+            "vision_yolo_running": self.vision_yolo_running,
+            "vision_mission_running": self.vision_mission_running,
             "pinger_running": bool(self._pinger and self._pinger.is_running),
             "bag_running": bool(self._bag and self._bag.is_running),
             "bag_output": self._bag_output,
@@ -322,6 +366,7 @@ class ProcessManager:
 
     def stop_all(self) -> None:
         self.stop_bag()
+        self.stop_vision()
         self.stop_pinger()
         self.stop_stack()
         self.stop_dronecan_allocator()
@@ -333,6 +378,14 @@ class ProcessManager:
     @property
     def dronecan_allocator_running(self) -> bool:
         return bool(self._dronecan_allocator and self._dronecan_allocator.is_running)
+
+    @property
+    def vision_yolo_running(self) -> bool:
+        return bool(self._vision_yolo and self._vision_yolo.is_running)
+
+    @property
+    def vision_mission_running(self) -> bool:
+        return bool(self._vision_mission and self._vision_mission.is_running)
 
     def stop_dronecan_allocator(self) -> None:
         if self._dronecan_allocator:
@@ -381,6 +434,19 @@ def _matching_launch_process_groups(robot_package: str, robot_launch: str) -> se
         except ProcessLookupError:
             continue
     return groups
+
+
+def _ros2_launch_command(
+    package: str,
+    launch_file: str,
+    launch_args: dict[str, str] | None,
+) -> list[str]:
+    cmd = ["ros2", "launch", package, launch_file]
+    for key, value in (launch_args or {}).items():
+        clean_value = str(value)
+        if clean_value != "":
+            cmd.append(f"{key}:={clean_value}")
+    return cmd
 
 
 def _is_matching_ros2_launch(

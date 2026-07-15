@@ -51,10 +51,22 @@ const state = {
       yaw: 0,
     },
   },
+  vision: {
+    visible: false,
+    frameTimer: null,
+    frameLoading: false,
+    frameSequence: 0,
+    frameImage: null,
+    detections: [],
+    process: {},
+    topics: {},
+    status: {},
+  },
 };
 
 const $ = (id) => document.getElementById(id);
 const BAG_SELECTION_KEY = "kmu26-auv-web-gui-bag-selection";
+const VISION_CONFIG_KEY = "kmu26-auv-web-gui-vision-config";
 
 function fmt(value, digits = 2) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "--";
@@ -247,6 +259,7 @@ function bindControls() {
 
   bindPathControls();
   bindWebControl();
+  bindVisionControls();
 }
 
 function showTab(name) {
@@ -261,6 +274,13 @@ function showTab(name) {
   }
   if (name === "bag" && !state.bag.topicsLoaded) {
     loadBagTopics().catch(showError);
+  }
+  state.vision.visible = name === "vision";
+  if (state.vision.visible) {
+    startVisionFrameLoop();
+    renderVisionCanvas();
+  } else {
+    stopVisionFrameLoop();
   }
 }
 
@@ -303,6 +323,7 @@ function renderStatus(payload) {
   const webControl = ros.web_control || {};
   const dvlConfig = ros.dvl_config || {};
   const dvlEvents = ros.dvl_events || [];
+  const vision = ros.vision || {};
 
   setPill("stack-pill", process.stack_running, process.stack_running ? "STACK ON" : "STACK OFF");
   const pingerAlive = Boolean(process.pinger_running && topics.pinger_homing?.alive);
@@ -339,6 +360,7 @@ function renderStatus(payload) {
   renderTopics(topics);
   renderPinger(process, ros);
   renderWebControlStatus(webControl);
+  renderVision(process, topics, vision, depth);
   state.path.points = ros.path || [];
   state.path.pose = {
     x: typeof pose.x === "number" ? pose.x : 0,
@@ -1224,7 +1246,9 @@ function dvlConfigPayload(config) {
 }
 
 function renderTopics(topics) {
-  const rows = Object.values(topics).map((topic) => {
+  const rows = Object.entries(topics)
+    .filter(([name]) => !name.startsWith("vision_"))
+    .map(([, topic]) => {
     const age = typeof topic.age === "number" ? `${fmt(topic.age, 2)}s` : "--";
     const hz = `${fmt(topic.hz, 1)} Hz`;
     const cls = topic.alive ? "alive" : "stale";
@@ -1233,7 +1257,7 @@ function renderTopics(topics) {
         <strong>${topic.name}</strong>
         <span>${topic.alive ? "alive" : "stale"} · ${hz} · age ${age}</span>
       </div>`;
-  });
+    });
   $("topic-list").innerHTML = rows.join("");
 }
 
@@ -1501,6 +1525,339 @@ function drawRobotMarker(ctx, pose, view) {
   ctx.fill();
   ctx.stroke();
   ctx.restore();
+}
+
+function bindVisionControls() {
+  loadVisionConfig();
+  document.querySelectorAll("[data-vision-yolo], [data-vision-mission]").forEach((input) => {
+    input.addEventListener("change", saveVisionConfig);
+  });
+
+  $("vision-start-yolo").addEventListener("click", () => {
+    startVisionYolo().catch(showError);
+  });
+  $("vision-stop-yolo").addEventListener("click", () => {
+    postJson("/api/vision/yolo/stop").catch(showError);
+  });
+  $("vision-start-mission").addEventListener("click", () => {
+    startVisionMission().catch(showError);
+  });
+  $("vision-stop-mission").addEventListener("click", () => {
+    postJson("/api/vision/mission/stop").catch(showError);
+  });
+  $("vision-start-all").addEventListener("click", () => {
+    startVisionStack().catch(showError);
+  });
+  $("vision-stop-all").addEventListener("click", () => {
+    postJson("/api/vision/stop").catch(showError);
+  });
+  $("vision-enable-control").addEventListener("click", () => {
+    toggleVisionControl().catch(showError);
+  });
+  $("vision-emergency-stop").addEventListener("click", () => {
+    postJson("/api/vision/emergency_stop").catch(showError);
+  });
+  window.addEventListener("resize", renderVisionCanvas);
+  renderVisionRcChannels([]);
+}
+
+function visionLaunchArgs(attribute) {
+  const args = {};
+  document.querySelectorAll(`[${attribute}]`).forEach((input) => {
+    const key = input.getAttribute(attribute);
+    if (!key) return;
+    args[key] = input.type === "checkbox" ? String(input.checked) : input.value.trim();
+  });
+  return args;
+}
+
+async function startVisionYolo() {
+  saveVisionConfig();
+  return postJson("/api/vision/yolo/start", {
+    launch_args: visionLaunchArgs("data-vision-yolo"),
+  });
+}
+
+async function startVisionMission() {
+  saveVisionConfig();
+  return postJson("/api/vision/mission/start", {
+    launch_args: visionLaunchArgs("data-vision-mission"),
+  });
+}
+
+async function startVisionStack() {
+  saveVisionConfig();
+  if (!state.vision.process.vision_yolo_running) {
+    await startVisionYolo();
+  }
+  if (!state.vision.process.vision_mission_running) {
+    await startVisionMission();
+  }
+}
+
+async function toggleVisionControl() {
+  const enabled = Boolean(state.vision.status.mission_enabled);
+  if (!enabled) {
+    const accepted = window.confirm(
+      "Enable autonomous mission control? Verify camera, depth sign, MAVROS mode, and PWM direction first.",
+    );
+    if (!accepted) return;
+  }
+  await postJson("/api/vision/control", { enabled: !enabled });
+}
+
+function saveVisionConfig() {
+  const values = {};
+  document.querySelectorAll("[data-vision-yolo], [data-vision-mission]").forEach((input) => {
+    const group = input.hasAttribute("data-vision-yolo") ? "yolo" : "mission";
+    const name = input.getAttribute(`data-vision-${group}`);
+    values[`${group}.${name}`] = input.type === "checkbox" ? input.checked : input.value;
+  });
+  localStorage.setItem(VISION_CONFIG_KEY, JSON.stringify(values));
+}
+
+function loadVisionConfig() {
+  let values = {};
+  try {
+    values = JSON.parse(localStorage.getItem(VISION_CONFIG_KEY) || "{}");
+  } catch (_) {
+    values = {};
+  }
+  Object.entries(values).forEach(([key, value]) => {
+    const [group, name] = key.split(".", 2);
+    const input = document.querySelector(`[data-vision-${group}="${name}"]`);
+    if (!input) return;
+    if (input.type === "checkbox") input.checked = Boolean(value);
+    else input.value = value;
+  });
+}
+
+function startVisionFrameLoop() {
+  if (state.vision.frameTimer) return;
+  refreshVisionFrame().catch(showThrottledVisionError);
+  state.vision.frameTimer = window.setInterval(() => {
+    refreshVisionFrame().catch(showThrottledVisionError);
+  }, 100);
+}
+
+function stopVisionFrameLoop() {
+  if (!state.vision.frameTimer) return;
+  window.clearInterval(state.vision.frameTimer);
+  state.vision.frameTimer = null;
+}
+
+async function refreshVisionFrame() {
+  if (state.vision.frameLoading || !state.vision.visible) return;
+  state.vision.frameLoading = true;
+  try {
+    const response = await fetch(`/api/vision/frame?after=${state.vision.frameSequence}`, {
+      cache: "no-store",
+    });
+    if (response.status === 204) return;
+    if (!response.ok) throw new Error(`vision frame failed: ${response.status}`);
+    const sequence = Number(response.headers.get("X-Vision-Frame-Sequence") || 0);
+    const blob = await response.blob();
+    const image = await decodeVisionImage(blob);
+    if (state.vision.frameImage?.close) state.vision.frameImage.close();
+    state.vision.frameImage = image;
+    state.vision.frameSequence = sequence;
+    $("vision-feed-empty").classList.add("hidden");
+    renderVisionCanvas();
+  } finally {
+    state.vision.frameLoading = false;
+  }
+}
+
+async function decodeVisionImage(blob) {
+  if (window.createImageBitmap) return window.createImageBitmap(blob);
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    return image;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function renderVision(process, topics, vision, depth) {
+  state.vision.process = process;
+  state.vision.topics = topics;
+  state.vision.status = vision;
+  state.vision.detections = vision.detections || [];
+
+  const annotatedFeedAlive = Boolean(topics.vision_camera?.alive);
+  const bboxAlive = Boolean(topics.vision_bbox?.alive);
+  const yoloRunning = Boolean(process.vision_yolo_running);
+  const missionRunning = Boolean(process.vision_mission_running);
+  const missionAlive = Boolean(topics.vision_mission_state?.alive)
+    || (vision.mission_state && vision.mission_state !== "UNKNOWN" && topics.vision_rc_command?.alive);
+  const controlEnabled = Boolean(vision.mission_enabled);
+
+  setPillState(
+    "vision-camera-pill",
+    annotatedFeedAlive ? "YOLO FEED LIVE" : yoloRunning ? "YOLO FEED WAIT" : "YOLO FEED OFF",
+    annotatedFeedAlive ? "good" : "warn",
+  );
+  setPillState(
+    "vision-yolo-pill",
+    bboxAlive ? (yoloRunning ? "YOLO LOCAL" : "YOLO DDS") : yoloRunning ? "YOLO WAIT" : "YOLO OFF",
+    bboxAlive ? "good" : yoloRunning ? "warn" : "bad",
+  );
+  setPillState(
+    "vision-mission-pill",
+    missionAlive ? (missionRunning ? "MISSION LOCAL" : "MISSION DDS") : missionRunning ? "MISSION WAIT" : "MISSION OFF",
+    missionAlive ? "good" : missionRunning ? "warn" : "bad",
+  );
+  setPillState(
+    "vision-control-pill",
+    controlEnabled ? "AUTO CONTROL ON" : "CONTROL OFF",
+    controlEnabled ? "bad" : "warn",
+  );
+
+  const missionState = vision.mission_state || "UNKNOWN";
+  $("vision-state-value").textContent = missionState;
+  $("vision-state-age").textContent = topicAgeText(topics.vision_mission_state);
+  document.querySelectorAll("[data-vision-state]").forEach((item) => {
+    const active = item.dataset.visionState === missionState;
+    item.classList.toggle("active", active);
+    item.classList.toggle("failsafe", active && missionState === "FAILSAFE");
+  });
+
+  const depthScale = Number(document.querySelector('[data-vision-mission="depth_pose_scale"]').value);
+  const depthOffset = Number(document.querySelector('[data-vision-mission="depth_pose_offset_m"]').value);
+  const missionDepth = typeof depth.z === "number"
+    ? depth.z * depthScale + depthOffset
+    : null;
+  $("vision-depth-value").textContent = fmtUnit(missionDepth, "m");
+  renderVisionDetections(state.vision.detections, bboxAlive);
+  renderVisionRcChannels(vision.rc_channels || []);
+  renderVisionCanvas();
+
+  $("vision-start-yolo").disabled = yoloRunning;
+  $("vision-stop-yolo").disabled = !yoloRunning;
+  $("vision-start-mission").disabled = missionRunning;
+  $("vision-stop-mission").disabled = !missionRunning;
+  $("vision-start-all").disabled = yoloRunning && missionRunning;
+  $("vision-stop-all").disabled = !yoloRunning && !missionRunning;
+  $("vision-enable-control").textContent = controlEnabled ? "Disable Auto Mission" : "Enable Auto Mission";
+  $("vision-enable-control").classList.toggle("danger", controlEnabled);
+
+  const logs = (process.logs || []).filter(
+    (line) => line.includes("[vision_") || line.includes("auv_buoy_vision_control"),
+  );
+  $("vision-log-output").textContent = logs.slice(-80).join("\n") || "Vision process logs will appear here.";
+
+  const frameSize = vision.frame_width && vision.frame_height
+    ? `${vision.frame_width}x${vision.frame_height}`
+    : "--";
+  $("vision-frame-meta").textContent = annotatedFeedAlive
+    ? `${frameSize} · frame ${vision.frame_sequence || 0} · ${fmt(topics.vision_camera?.hz, 1)} Hz`
+    : "Waiting for completed YOLO frame";
+}
+
+function topicAgeText(topic) {
+  if (!topic || typeof topic.age !== "number") return "No topic";
+  return `${fmt(topic.age, 2)} s ago · ${fmt(topic.hz, 1)} Hz`;
+}
+
+function renderVisionDetections(detections, bboxAlive) {
+  const fresh = detections.filter((item) => typeof item.age !== "number" || item.age <= 1.5);
+  const buoyClass = Number($("vision-buoy-class").value);
+  const stickClass = Number($("vision-stick-class").value);
+  if (!fresh.length) {
+    $("vision-detections").innerHTML = `<div class="vision-detection-empty">${bboxAlive ? "YOLO active · no target" : "No YOLO bbox topic"}</div>`;
+    $("vision-detection-value").textContent = bboxAlive ? "NO TARGET" : "OFFLINE";
+    $("vision-error-value").textContent = "--";
+    $("vision-area-value").textContent = "--";
+    return;
+  }
+
+  const classLabel = (classId) => {
+    if (classId === buoyClass) return "BUOY";
+    if (classId === stickClass) return "STICK";
+    return `CLASS ${classId}`;
+  };
+  $("vision-detections").innerHTML = fresh.map((item) => `
+    <div class="vision-detection-card">
+      <strong>${classLabel(item.class_id)}</strong><strong>${fmtPercent(item.confidence, 1)}</strong>
+      <span>error x/y</span><span>${fmt(item.error_x, 3)} / ${fmt(item.error_y, 3)}</span>
+      <span>area</span><span>${fmtPercent(item.area_ratio, 2)}</span>
+    </div>
+  `).join("");
+  const target = fresh[0];
+  $("vision-detection-value").textContent = `${classLabel(target.class_id)} ${fmtPercent(target.confidence, 1)}`;
+  $("vision-error-value").textContent = `${fmt(target.error_x, 3)}, ${fmt(target.error_y, 3)}`;
+  $("vision-area-value").textContent = fmtPercent(target.area_ratio, 2);
+}
+
+function renderVisionRcChannels(channels) {
+  const configuredControls = [
+    { parameter: "throttle_channel", fallback: 3, label: "Vertical" },
+    { parameter: "yaw_channel", fallback: 4, label: "Yaw" },
+    { parameter: "forward_channel", fallback: 5, label: "Forward" },
+  ];
+  const labelsByChannel = new Map(configuredControls.map((item) => {
+    const input = document.querySelector(`[data-vision-mission="${item.parameter}"]`);
+    const configuredChannel = Number(input?.value);
+    const channel = Number.isInteger(configuredChannel) && configuredChannel >= 1 && configuredChannel <= 18
+      ? configuredChannel
+      : item.fallback;
+    return [channel, item.label];
+  }));
+  $("vision-rc-grid").innerHTML = Array.from({ length: 18 }, (_, index) => {
+    const channel = index + 1;
+    const label = labelsByChannel.get(channel) || "RC Channel";
+    const receivedValue = channels[channel - 1];
+    const value = typeof receivedValue === "number" ? Math.round(receivedValue) : null;
+    const isPwm = value !== null && value !== 0 && value !== 65535;
+    let displayValue = value === null ? "--" : String(value);
+    let detail = "NO MESSAGE";
+    if (value === 0) {
+      displayValue = "RELEASE";
+      detail = "RAW 0";
+    } else if (value === 65535) {
+      displayValue = "NO COMMAND";
+      detail = "RAW 65535";
+    } else if (isPwm) detail = "PWM µs";
+    return `
+      <div class="vision-rc-channel ${isPwm ? "command" : "special"} ${labelsByChannel.has(channel) ? "controlled" : ""}">
+        <span>${label} · CH${channel}</span>
+        <strong>${displayValue}</strong>
+        <small>${detail}</small>
+      </div>
+    `;
+  }).join("");
+  $("vision-rc-meta").textContent = channels.length
+    ? topicAgeText(state.vision.topics.vision_rc_command)
+    : "No output";
+}
+
+function renderVisionCanvas() {
+  const canvas = $("vision-canvas");
+  const ctx = canvas.getContext("2d");
+  const image = state.vision.frameImage;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!image) return;
+
+  const imageWidth = image.width || image.naturalWidth;
+  const imageHeight = image.height || image.naturalHeight;
+  if (!imageWidth || !imageHeight) return;
+  const scale = Math.min(canvas.width / imageWidth, canvas.height / imageHeight);
+  const drawWidth = imageWidth * scale;
+  const drawHeight = imageHeight * scale;
+  const offsetX = (canvas.width - drawWidth) / 2;
+  const offsetY = (canvas.height - drawHeight) / 2;
+  ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
+}
+
+function showThrottledVisionError(error) {
+  const now = Date.now();
+  if (!state.vision.lastErrorAt || now - state.vision.lastErrorAt > 3000) {
+    state.vision.lastErrorAt = now;
+    showError(error);
+  }
 }
 
 function showError(error) {
