@@ -74,6 +74,65 @@ ALLOWED_CONTROL_MODES = {
     "GUIDED",
 }
 
+VISION_YOLO_LAUNCH_ARGS = {
+    "image_topic",
+    "bbox_topic",
+    "annotated_image_topic",
+    "publish_annotated_image",
+    "annotated_jpeg_quality",
+    "model_path",
+    "target_class_name",
+    "target_class_id",
+    "confidence_threshold",
+    "device",
+    "imgsz",
+    "show_preview",
+    "preview_window_name",
+    "publish_per_class",
+}
+
+VISION_MISSION_LAUNCH_ARGS = {
+    "bbox_topic",
+    "depth_topic",
+    "depth_pose_topic",
+    "depth_pose_scale",
+    "depth_pose_offset_m",
+    "enable_topic",
+    "state_topic",
+    "rc_override_topic",
+    "rc_monitor_topic",
+    "control_rate_hz",
+    "throttle_channel",
+    "yaw_channel",
+    "forward_channel",
+    "neutral_pwm",
+    "min_pwm",
+    "max_pwm",
+    "max_yaw_delta",
+    "forward_pwm",
+    "yaw_invert",
+    "vertical_positive_is_up",
+    "work_depth_m",
+    "surface_depth_m",
+    "max_depth_m",
+    "buoy_class_id",
+    "stick_class_id",
+    "approach_area_ratio",
+    "fork_target_x",
+    "fork_target_y",
+    "stick_deadband_x",
+    "stick_deadband_y",
+    "align_stable_sec",
+    "insert_pwm",
+    "insert_duration_sec",
+    "detach_pwm",
+    "detach_duration_sec",
+    "backoff_pwm",
+    "backoff_duration_sec",
+    "search_timeout_sec",
+    "area_verify_sec",
+}
+
 
 def create_app(
     robot_package: str,
@@ -261,6 +320,81 @@ def create_app(
         payload["accepted"] = accepted
         return payload
 
+    @app.post("/api/vision/yolo/start")
+    async def start_vision_yolo(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        try:
+            launch_args = _validated_launch_args(body, VISION_YOLO_LAUNCH_ARGS)
+            if not launch_args.get("model_path"):
+                raise RuntimeError("model_path is required to start YOLO")
+            launch_args.setdefault("show_preview", "false")
+            process_manager.start_vision_yolo(launch_args)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/vision/yolo/stop")
+    def stop_vision_yolo() -> dict:
+        ros_interface.release_vision_control()
+        process_manager.stop_vision_yolo()
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/vision/mission/start")
+    async def start_vision_mission(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        try:
+            process_manager.start_vision_mission(
+                _validated_launch_args(body, VISION_MISSION_LAUNCH_ARGS)
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/vision/mission/stop")
+    def stop_vision_mission() -> dict:
+        ros_interface.release_vision_control()
+        time.sleep(0.15)
+        process_manager.stop_vision_mission()
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/vision/control")
+    async def set_vision_control(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        enabled = _parse_bool(body.get("enabled", False))
+        if enabled and ros_interface.topic_publisher_count("/mission/state") <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="mission controller is not available; start it before enabling control",
+            )
+        ros_interface.set_vision_control_enabled(enabled)
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/vision/emergency_stop")
+    def stop_vision_control() -> dict:
+        ros_interface.release_vision_control()
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/vision/stop")
+    def stop_vision_all() -> dict:
+        ros_interface.release_vision_control()
+        time.sleep(0.15)
+        process_manager.stop_vision()
+        return _status(process_manager, ros_interface)
+
+    @app.get("/api/vision/frame")
+    def vision_frame(after: int = 0) -> Response:
+        data, content_type, sequence = ros_interface.latest_vision_frame()
+        if not data or sequence <= after:
+            return Response(status_code=204)
+        return Response(
+            content=data,
+            media_type=content_type,
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "X-Vision-Frame-Sequence": str(sequence),
+            },
+        )
+
     @app.get("/api/ekf/process_noise")
     def get_process_noise() -> dict:
         return read_process_noise_covariance()
@@ -363,6 +497,20 @@ async def _json_or_empty(request: Request) -> dict:
         return await request.json()
     except Exception:
         return {}
+
+
+def _validated_launch_args(body: dict, allowed: set[str]) -> dict[str, str]:
+    raw_args = body.get("launch_args", body)
+    if not isinstance(raw_args, dict):
+        raise RuntimeError("launch_args must be an object")
+    unknown = sorted(str(key) for key in raw_args if str(key) not in allowed)
+    if unknown:
+        raise RuntimeError(f"unsupported launch argument(s): {', '.join(unknown)}")
+    return {
+        str(key): str(value).strip()
+        for key, value in raw_args.items()
+        if value is not None and str(value).strip() != ""
+    }
 
 
 def _status(process_manager: ProcessManager, ros_interface: RosInterface) -> dict:

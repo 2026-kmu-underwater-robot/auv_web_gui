@@ -11,6 +11,7 @@ from dvl_msgs.msg import ConfigCommand
 from dvl_msgs.msg import ConfigStatus
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import TwistWithCovarianceStamped
+from mavros_msgs.msg import OverrideRCIn
 from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool
 from mavros_msgs.srv import SetMode
@@ -19,10 +20,17 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.executors import SingleThreadedExecutor
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy
+from rclpy.qos import QoSProfile
+from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import BatteryState
+from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import Imu
 from sensor_msgs.msg import Joy
+from std_msgs.msg import Bool
+from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import String
 
 
 PATH_MIN_DISTANCE_M = 0.01
@@ -125,6 +133,15 @@ class LocalizationRosNode(Node):
             "mavros_state": TopicHealth("/mavros/state", stale_after=2.0),
             "joy": TopicHealth("/joy", stale_after=0.5),
             "battery": TopicHealth("/battery", stale_after=3.0),
+            "vision_camera": TopicHealth(
+                "/vision/yolo/annotated/compressed", stale_after=1.5
+            ),
+            "vision_bbox": TopicHealth("/vision/buoy_bbox", stale_after=1.0),
+            "vision_mission_enable": TopicHealth(
+                "/mission/control_enable", stale_after=5.0
+            ),
+            "vision_mission_state": TopicHealth("/mission/state", stale_after=3.0),
+            "vision_rc_command": TopicHealth("/mission/rc_command", stale_after=1.0),
         }
         self._pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
         self._velocity = {"x": 0.0, "y": 0.0, "z": 0.0}
@@ -182,8 +199,25 @@ class LocalizationRosNode(Node):
             "last_publish": "",
             "neutral_burst": 0,
         }
+        self._vision = {
+            "frame_sequence": 0,
+            "frame_stamp": 0.0,
+            "frame_width": 0,
+            "frame_height": 0,
+            "detections": {},
+            "mission_enabled": False,
+            "mission_state": "UNKNOWN",
+            "rc_channels": [],
+        }
+        self._vision_frame_data = b""
+        self._vision_frame_content_type = "image/jpeg"
 
         sensor_qos = qos_profile_sensor_data
+        state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
         self._dvl_config_pub = self.create_publisher(
             ConfigCommand,
@@ -191,6 +225,12 @@ class LocalizationRosNode(Node):
             sensor_qos,
         )
         self._web_joy_pub = self.create_publisher(Joy, "/joy", 10)
+        self._vision_enable_pub = self.create_publisher(
+            Bool, "/mission/control_enable", 10
+        )
+        self._vision_rc_release_pub = self.create_publisher(
+            OverrideRCIn, "/mavros/rc/override", 10
+        )
         self._arm_client = self.create_client(CommandBool, "/mavros/cmd/arming")
         self._set_mode_client = self.create_client(SetMode, "/mavros/set_mode")
         self._set_pose_client = self.create_client(SetPose, "/set_pose")
@@ -204,6 +244,27 @@ class LocalizationRosNode(Node):
         self.create_subscription(State, "/mavros/state", self._on_mavros_state, 20)
         self.create_subscription(Imu, "/mavros/imu/data", self._on_imu, sensor_qos)
         self.create_subscription(Joy, "/joy", self._on_joy, 20)
+        self.create_subscription(
+            CompressedImage,
+            "/vision/yolo/annotated/compressed",
+            self._on_vision_image,
+            sensor_qos,
+        )
+        self.create_subscription(
+            Float32MultiArray, "/vision/buoy_bbox", self._on_vision_bbox, 20
+        )
+        self.create_subscription(
+            Bool, "/mission/control_enable", self._on_vision_enable, 10
+        )
+        self.create_subscription(
+            String, "/mission/state", self._on_vision_state, state_qos
+        )
+        self.create_subscription(
+            OverrideRCIn,
+            "/mission/rc_command",
+            self._on_vision_rc_command,
+            20,
+        )
         self.create_timer(WEB_CONTROL_PERIOD_S, self._publish_web_control)
 
     def publish_dvl_command(
@@ -247,7 +308,31 @@ class LocalizationRosNode(Node):
                 "path": list(self._path),
                 "path_count": len(self._path),
                 "web_control": self._web_control_snapshot(),
+                "vision": self._vision_snapshot_locked(),
             }
+
+    def latest_vision_frame(self) -> tuple[bytes, str, int]:
+        with self._lock:
+            return (
+                self._vision_frame_data,
+                self._vision_frame_content_type,
+                int(self._vision["frame_sequence"]),
+            )
+
+    def set_vision_control_enabled(self, enabled: bool) -> None:
+        msg = Bool()
+        msg.data = bool(enabled)
+        self._vision_enable_pub.publish(msg)
+        with self._lock:
+            self._vision["mission_enabled"] = bool(enabled)
+
+    def release_vision_control(self) -> None:
+        self.set_vision_control_enabled(False)
+        msg = OverrideRCIn()
+        msg.channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
+        for channel in (3, 4, 5):
+            msg.channels[channel - 1] = OverrideRCIn.CHAN_RELEASE
+        self._vision_rc_release_pub.publish(msg)
 
     def clear_path(self) -> None:
         with self._lock:
@@ -659,6 +744,96 @@ class LocalizationRosNode(Node):
                 "buttons": list(msg.buttons),
             }
 
+    def _on_vision_image(self, msg: CompressedImage) -> None:
+        image_format = str(msg.format or "jpeg").lower()
+        content_type = "image/png" if "png" in image_format else "image/jpeg"
+        stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        with self._lock:
+            self._health["vision_camera"].tick()
+            self._vision_frame_data = bytes(msg.data)
+            self._vision_frame_content_type = content_type
+            self._vision["frame_sequence"] = int(self._vision["frame_sequence"]) + 1
+            self._vision["frame_stamp"] = stamp
+
+    def _on_vision_bbox(self, msg: Float32MultiArray) -> None:
+        if len(msg.data) < 10:
+            return
+        values = [float(value) for value in msg.data[:10]]
+        if not all(math.isfinite(value) for value in values):
+            return
+        (
+            stamp,
+            detected,
+            class_id,
+            confidence,
+            center_x,
+            center_y,
+            width,
+            height,
+            image_width,
+            image_height,
+        ) = values
+        now = time.monotonic()
+        with self._lock:
+            self._health["vision_bbox"].tick()
+            previous_stamp = float(self._vision.get("detection_stamp", -1.0))
+            if abs(stamp - previous_stamp) > 1e-6:
+                self._vision["detections"] = {}
+                self._vision["detection_stamp"] = stamp
+            self._vision["frame_width"] = max(0, int(round(image_width)))
+            self._vision["frame_height"] = max(0, int(round(image_height)))
+            if detected >= 0.5 and image_width > 0.0 and image_height > 0.0:
+                class_key = str(int(round(class_id)))
+                self._vision["detections"][class_key] = {
+                    "detected": True,
+                    "class_id": int(round(class_id)),
+                    "confidence": confidence,
+                    "center_x": center_x,
+                    "center_y": center_y,
+                    "width": width,
+                    "height": height,
+                    "image_width": image_width,
+                    "image_height": image_height,
+                    "error_x": (center_x - image_width / 2.0) / (image_width / 2.0),
+                    "error_y": (center_y - image_height / 2.0) / (image_height / 2.0),
+                    "area_ratio": max(0.0, width * height / (image_width * image_height)),
+                    "received_at": now,
+                }
+
+    def _on_vision_enable(self, msg: Bool) -> None:
+        with self._lock:
+            self._health["vision_mission_enable"].tick()
+            self._vision["mission_enabled"] = bool(msg.data)
+
+    def _on_vision_state(self, msg: String) -> None:
+        with self._lock:
+            self._health["vision_mission_state"].tick()
+            self._vision["mission_state"] = str(msg.data or "UNKNOWN")
+
+    def _on_vision_rc_command(self, msg: OverrideRCIn) -> None:
+        with self._lock:
+            self._health["vision_rc_command"].tick()
+            self._vision["rc_channels"] = [int(value) for value in msg.channels]
+
+    def _vision_snapshot_locked(self) -> dict:
+        now = time.monotonic()
+        detections = []
+        for item in self._vision["detections"].values():
+            clean = {key: value for key, value in item.items() if key != "received_at"}
+            clean["age"] = max(0.0, now - float(item["received_at"]))
+            detections.append(clean)
+        detections.sort(key=lambda item: item["class_id"])
+        return {
+            "frame_sequence": int(self._vision["frame_sequence"]),
+            "frame_stamp": float(self._vision["frame_stamp"]),
+            "frame_width": int(self._vision["frame_width"]),
+            "frame_height": int(self._vision["frame_height"]),
+            "detections": detections,
+            "mission_enabled": bool(self._vision["mission_enabled"]),
+            "mission_state": str(self._vision["mission_state"]),
+            "rc_channels": list(self._vision["rc_channels"]),
+        }
+
     def _append_dvl_event(
         self,
         event_type: str,
@@ -952,6 +1127,21 @@ class RosInterface:
         if self.node is None:
             raise RuntimeError("ROS interface is not running")
         return self.node.set_mode(mode)
+
+    def latest_vision_frame(self) -> tuple[bytes, str, int]:
+        if self.node is None:
+            return b"", "image/jpeg", 0
+        return self.node.latest_vision_frame()
+
+    def set_vision_control_enabled(self, enabled: bool) -> None:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        self.node.set_vision_control_enabled(enabled)
+
+    def release_vision_control(self) -> None:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        self.node.release_vision_control()
 
 
 def _clamp_axis(value: object) -> float:
