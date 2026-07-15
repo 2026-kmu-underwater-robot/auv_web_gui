@@ -13,6 +13,8 @@ if [[ -n "${KMU26_WEB_GUI_PORT+x}" ]]; then
 fi
 ROBOT_PACKAGE="${KMU26_ROBOT_PACKAGE:-hit25_auv_ros2}"
 ROBOT_LAUNCH="${KMU26_ROBOT_LAUNCH:-localization_test.launch.py}"
+PINGER_PACKAGE="${KMU26_PINGER_PACKAGE:-kmu26_pinger_homing}"
+PINGER_LAUNCH="${KMU26_PINGER_LAUNCH:-pinger_homing_real.launch.py}"
 
 source_if_exists() {
   local setup_file="$1"
@@ -132,7 +134,9 @@ if ros2 pkg prefix kmu26_auv_web_gui >/dev/null 2>&1; then
     --host "${HOST}" \
     --port "${PORT}" \
     --robot-package "${ROBOT_PACKAGE}" \
-    --robot-launch "${ROBOT_LAUNCH}"
+    --robot-launch "${ROBOT_LAUNCH}" \
+    --pinger-package "${PINGER_PACKAGE}" \
+    --pinger-launch "${PINGER_LAUNCH}"
 fi
 
 export PYTHONPATH="${PACKAGE_DIR}:${PYTHONPATH:-}"
@@ -141,4 +145,6 @@ exec python3 -m kmu26_auv_web_gui.server \
   --host "${HOST}" \
   --port "${PORT}" \
   --robot-package "${ROBOT_PACKAGE}" \
-  --robot-launch "${ROBOT_LAUNCH}"
+  --robot-launch "${ROBOT_LAUNCH}" \
+  --pinger-package "${PINGER_PACKAGE}" \
+  --pinger-launch "${PINGER_LAUNCH}"

@@ -1,6 +1,7 @@
-# Localization Test GUI
+# AUV Web GUI
 
-Web control panel for running AUV localization tests from a browser.
+Web control panel for running AUV localization tests and real-vehicle pinger
+homing from a browser.
 
 The intended deployment is:
 
@@ -35,6 +36,42 @@ Then open:
 ```text
 http://<ubuntu-robot-ip>:8080
 ```
+
+## Pinger Homing tab
+
+The **Pinger Homing** tab starts the standalone `kmu26_pinger_homing` ROS 2
+package, shows its estimator/controller/RC-mux status, and supports a safe dry
+run before live MAVROS RC output.
+
+Place both repositories in the same ROS 2 workspace and build them:
+
+```bash
+cd ~/catkin_ws/src
+git clone https://github.com/2026-kmu-underwater-robot/kmu26_mission_fsm.git
+git clone https://github.com/2026-kmu-underwater-robot/kmu26_auv_web_gui.git
+cd ~/catkin_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select kmu26_pinger_homing kmu26_auv_web_gui
+source install/setup.bash
+```
+
+Start the robot stack first. The GUI routes joystick RC through
+`/control/joystick/rc_override`, while the pinger controller uses
+`/control/pinger/rc_override`; the RC mux remains the sole publisher to
+`/mavros/rc/override`.
+
+Recommended sequence on the physical robot:
+
+1. Open the Pinger Homing tab and use **Start Dry Run**.
+2. Confirm fresh odometry, MAVROS, hydrophone direction, and audio status.
+3. Stop the dry run, choose a vehicle mode, and arm only after the propeller
+   area is clear.
+4. Run **Preflight**, then use **Start Live RC** only when every check passes.
+5. Use **Stop** or **DISARM** at any time to release RC output.
+
+`Success range` must stay `0` until `IQ range constant` has been calibrated on
+the real hydrophone. `Tank max depth` is the known tank depth used by the
+controller's vertical search safety logic.
 
 ## Python Dependencies
 
