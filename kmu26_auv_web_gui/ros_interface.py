@@ -1,3 +1,4 @@
+import json
 import math
 import threading
 import time
@@ -11,6 +12,8 @@ from dvl_msgs.msg import ConfigCommand
 from dvl_msgs.msg import ConfigStatus
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import TwistWithCovarianceStamped
+from mavros_msgs.msg import OverrideRCIn
+from geometry_msgs.msg import Vector3Stamped
 from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool
 from mavros_msgs.srv import SetMode
@@ -19,10 +22,18 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.executors import SingleThreadedExecutor
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy
+from rclpy.qos import QoSProfile
+from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import BatteryState
+from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import Imu
 from sensor_msgs.msg import Joy
+from std_msgs.msg import Bool
+from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float64
+from std_msgs.msg import String
 
 
 PATH_MIN_DISTANCE_M = 0.01
@@ -112,23 +123,60 @@ class TopicHealth:
         return (len(recent) - 1) / (recent[-1] - recent[0])
 
 
+@dataclass(frozen=True)
+class TopicConfig:
+    odom: str = "/odometry/filtered"
+    depth: str = "/depth/pose"
+    mavros_state: str = "/mavros/state"
+    pinger_homing_status: str = "/pinger_homing/status"
+    hydrophone_direction: str = "/homing/direction"
+    delta_range: str = "/audio_phase_estimator/delta_range_m"
+    iq_magnitude: str = "/audio_phase_estimator/iq_magnitude"
+    rc_mux_status: str = "/control/rc_override_mux/status"
+    rc_output: str = "/mavros/rc/override"
+    audio: str = "/audio"
+
+
 class LocalizationRosNode(Node):
-    def __init__(self):
+    def __init__(self, topic_config: TopicConfig | None = None):
         super().__init__("kmu26_auv_web_gui_bridge")
+        self._topic_config = topic_config or TopicConfig()
         self._lock = threading.Lock()
         self._health = {
-            "odom": TopicHealth("/odometry/filtered"),
+            "odom": TopicHealth(self._topic_config.odom),
             "dvl": TopicHealth("/dvl/twist"),
             "dvl_data": TopicHealth("/dvl/data"),
-            "depth": TopicHealth("/depth/pose"),
+            "depth": TopicHealth(self._topic_config.depth),
             "imu": TopicHealth("/mavros/imu/data"),
-            "mavros_state": TopicHealth("/mavros/state", stale_after=2.0),
+            "mavros_state": TopicHealth(self._topic_config.mavros_state, stale_after=2.0),
             "joy": TopicHealth("/joy", stale_after=0.5),
             "battery": TopicHealth("/battery", stale_after=3.0),
+            "vision_camera": TopicHealth(
+                "/vision/yolo/annotated/compressed", stale_after=1.5
+            ),
+            "vision_bbox": TopicHealth("/vision/buoy_bbox", stale_after=1.0),
+            "vision_mission_enable": TopicHealth(
+                "/mission/control_enable", stale_after=5.0
+            ),
+            "vision_mission_state": TopicHealth("/mission/state", stale_after=3.0),
+            "vision_rc_command": TopicHealth("/mission/rc_command", stale_after=1.0),
+            "pinger_homing": TopicHealth(
+                self._topic_config.pinger_homing_status, stale_after=1.5
+            ),
+            "hydrophone_direction": TopicHealth(
+                self._topic_config.hydrophone_direction, stale_after=1.5
+            ),
+            "delta_range": TopicHealth(self._topic_config.delta_range, stale_after=1.5),
+            "iq_magnitude": TopicHealth(self._topic_config.iq_magnitude, stale_after=1.5),
+            "rc_mux": TopicHealth(self._topic_config.rc_mux_status, stale_after=1.0),
         }
         self._pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
         self._velocity = {"x": 0.0, "y": 0.0, "z": 0.0}
         self._depth = {"z": 0.0}
+        self._frames = {
+            "odom": {"frame_id": "", "child_frame_id": ""},
+            "depth": {"frame_id": ""},
+        }
         self._attitude = {
             "roll_deg": None,
             "pitch_deg": None,
@@ -167,6 +215,29 @@ class LocalizationRosNode(Node):
         }
         self._joy = {"axes": [], "buttons": []}
         self._dvl_config: dict = {}
+        self._pinger_homing_status = {
+            "raw": "",
+            "state": "",
+            "dry_run": True,
+            "control_output_active": False,
+            "estimated_distance_m": None,
+            "amplitude_distance_m": None,
+            "bearing_error_deg": None,
+        }
+        self._hydrophone_direction = {
+            "x": None,
+            "y": None,
+            "z": None,
+            "bearing_rad": None,
+        }
+        self._delta_range_m: float | None = None
+        self._iq_magnitude: float | None = None
+        self._rc_mux_status = {
+            "owner": "unknown",
+            "conflict": False,
+            "output_enabled": False,
+            "publisher_count": 0,
+        }
         self._dvl_events: deque[dict] = deque(maxlen=40)
         self._path: list[dict[str, float]] = []
         self._web_control = {
@@ -182,8 +253,25 @@ class LocalizationRosNode(Node):
             "last_publish": "",
             "neutral_burst": 0,
         }
+        self._vision = {
+            "frame_sequence": 0,
+            "frame_stamp": 0.0,
+            "frame_width": 0,
+            "frame_height": 0,
+            "detections": {},
+            "mission_enabled": False,
+            "mission_state": "UNKNOWN",
+            "rc_channels": [],
+        }
+        self._vision_frame_data = b""
+        self._vision_frame_content_type = "image/jpeg"
 
         sensor_qos = qos_profile_sensor_data
+        state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
         self._dvl_config_pub = self.create_publisher(
             ConfigCommand,
@@ -191,19 +279,69 @@ class LocalizationRosNode(Node):
             sensor_qos,
         )
         self._web_joy_pub = self.create_publisher(Joy, "/joy", 10)
+        self._vision_enable_pub = self.create_publisher(
+            Bool, "/mission/control_enable", 10
+        )
         self._arm_client = self.create_client(CommandBool, "/mavros/cmd/arming")
         self._set_mode_client = self.create_client(SetMode, "/mavros/set_mode")
         self._set_pose_client = self.create_client(SetPose, "/set_pose")
-        self.create_subscription(Odometry, "/odometry/filtered", self._on_odom, sensor_qos)
+        self.create_subscription(Odometry, self._topic_config.odom, self._on_odom, sensor_qos)
         self.create_subscription(TwistWithCovarianceStamped, "/dvl/twist", self._on_dvl, sensor_qos)
         self.create_subscription(DVL, "/dvl/data", self._on_dvl_data, sensor_qos)
         self.create_subscription(CommandResponse, "/dvl/command/response", self._on_dvl_response, sensor_qos)
         self.create_subscription(ConfigStatus, "/dvl/config/status", self._on_dvl_config, sensor_qos)
-        self.create_subscription(PoseWithCovarianceStamped, "/depth/pose", self._on_depth, sensor_qos)
+        self.create_subscription(
+            PoseWithCovarianceStamped,
+            self._topic_config.depth,
+            self._on_depth,
+            sensor_qos,
+        )
         self.create_subscription(BatteryState, "/battery", self._on_battery, sensor_qos)
-        self.create_subscription(State, "/mavros/state", self._on_mavros_state, 20)
+        self.create_subscription(State, self._topic_config.mavros_state, self._on_mavros_state, 20)
         self.create_subscription(Imu, "/mavros/imu/data", self._on_imu, sensor_qos)
         self.create_subscription(Joy, "/joy", self._on_joy, 20)
+        self.create_subscription(
+            CompressedImage,
+            "/vision/yolo/annotated/compressed",
+            self._on_vision_image,
+            sensor_qos,
+        )
+        self.create_subscription(
+            Float32MultiArray, "/vision/buoy_bbox", self._on_vision_bbox, 20
+        )
+        self.create_subscription(
+            Bool, "/mission/control_enable", self._on_vision_enable, 10
+        )
+        self.create_subscription(
+            String, "/mission/state", self._on_vision_state, state_qos
+        )
+        self.create_subscription(
+            OverrideRCIn,
+            "/mission/rc_command",
+            self._on_vision_rc_command,
+            20,
+        )
+        self.create_subscription(
+            String,
+            self._topic_config.pinger_homing_status,
+            self._on_pinger_homing,
+            20,
+        )
+        self.create_subscription(
+            Vector3Stamped,
+            self._topic_config.hydrophone_direction,
+            self._on_hydrophone_direction,
+            20,
+        )
+        self.create_subscription(
+            Float64, self._topic_config.delta_range, self._on_delta_range, 50
+        )
+        self.create_subscription(
+            Float64, self._topic_config.iq_magnitude, self._on_iq_magnitude, 50
+        )
+        self.create_subscription(
+            String, self._topic_config.rc_mux_status, self._on_rc_mux_status, 20
+        )
         self.create_timer(WEB_CONTROL_PERIOD_S, self._publish_web_control)
 
     def publish_dvl_command(
@@ -227,12 +365,53 @@ class LocalizationRosNode(Node):
         )
 
     def snapshot(self) -> dict:
+        topic_names_and_types = dict(self.get_topic_names_and_types())
+        rc_output_publishers = self.get_publishers_info_by_topic(
+            self._topic_config.rc_output
+        )
+        audio_publishers = self.get_publishers_info_by_topic(self._topic_config.audio)
+        graph = {
+            "rc_output_publishers": len(rc_output_publishers),
+            "rc_output_publisher_nodes": _endpoint_nodes(rc_output_publishers),
+            "audio_publishers": len(audio_publishers),
+            "audio_publisher_nodes": _endpoint_nodes(audio_publishers),
+            "topic_types": {
+                "odom": list(topic_names_and_types.get(self._topic_config.odom, [])),
+                "depth": list(topic_names_and_types.get(self._topic_config.depth, [])),
+                "mavros_state": list(
+                    topic_names_and_types.get(self._topic_config.mavros_state, [])
+                ),
+                "audio": list(topic_names_and_types.get(self._topic_config.audio, [])),
+            },
+            "services": {
+                "arming": self._arm_client.service_is_ready(),
+                "set_mode": self._set_mode_client.service_is_ready(),
+            },
+        }
         with self._lock:
             return {
+                "config": {
+                    "topics": {
+                        "odom": self._topic_config.odom,
+                        "depth": self._topic_config.depth,
+                        "mavros_state": self._topic_config.mavros_state,
+                        "pinger_homing_status": self._topic_config.pinger_homing_status,
+                        "hydrophone_direction": self._topic_config.hydrophone_direction,
+                        "delta_range": self._topic_config.delta_range,
+                        "iq_magnitude": self._topic_config.iq_magnitude,
+                        "rc_mux_status": self._topic_config.rc_mux_status,
+                        "rc_output": self._topic_config.rc_output,
+                        "audio": self._topic_config.audio,
+                    }
+                },
                 "topics": {name: item.snapshot() for name, item in self._health.items()},
                 "pose": dict(self._pose),
                 "velocity": dict(self._velocity),
                 "depth": dict(self._depth),
+                "frames": {
+                    "odom": dict(self._frames["odom"]),
+                    "depth": dict(self._frames["depth"]),
+                },
                 "attitude": dict(self._attitude),
                 "dvl_quality": dict(self._dvl_quality),
                 "precheck": self._precheck_snapshot_locked(),
@@ -247,7 +426,32 @@ class LocalizationRosNode(Node):
                 "path": list(self._path),
                 "path_count": len(self._path),
                 "web_control": self._web_control_snapshot(),
+                "vision": self._vision_snapshot_locked(),
+                "pinger_homing_status": dict(self._pinger_homing_status),
+                "hydrophone_direction": dict(self._hydrophone_direction),
+                "delta_range_m": self._delta_range_m,
+                "iq_magnitude": self._iq_magnitude,
+                "rc_mux_status": dict(self._rc_mux_status),
+                "graph": graph,
             }
+
+    def latest_vision_frame(self) -> tuple[bytes, str, int]:
+        with self._lock:
+            return (
+                self._vision_frame_data,
+                self._vision_frame_content_type,
+                int(self._vision["frame_sequence"]),
+            )
+
+    def set_vision_control_enabled(self, enabled: bool) -> None:
+        msg = Bool()
+        msg.data = bool(enabled)
+        self._vision_enable_pub.publish(msg)
+        with self._lock:
+            self._vision["mission_enabled"] = bool(enabled)
+
+    def release_vision_control(self) -> None:
+        self.set_vision_control_enabled(False)
 
     def clear_path(self) -> None:
         with self._lock:
@@ -473,6 +677,10 @@ class LocalizationRosNode(Node):
                 "z": pose.position.z,
                 "yaw": yaw,
             }
+            self._frames["odom"] = {
+                "frame_id": msg.header.frame_id,
+                "child_frame_id": msg.child_frame_id,
+            }
             self._append_path_point(pose.position.x, pose.position.y)
 
     def _append_path_point(self, x: float, y: float) -> None:
@@ -603,6 +811,7 @@ class LocalizationRosNode(Node):
         with self._lock:
             self._health["depth"].tick()
             self._depth = {"z": msg.pose.pose.position.z}
+            self._frames["depth"] = {"frame_id": msg.header.frame_id}
 
     def _on_battery(self, msg: BatteryState) -> None:
         with self._lock:
@@ -659,6 +868,196 @@ class LocalizationRosNode(Node):
                 "buttons": list(msg.buttons),
             }
 
+    def _on_vision_image(self, msg: CompressedImage) -> None:
+        image_format = str(msg.format or "jpeg").lower()
+        content_type = "image/png" if "png" in image_format else "image/jpeg"
+        stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        with self._lock:
+            self._health["vision_camera"].tick()
+            self._vision_frame_data = bytes(msg.data)
+            self._vision_frame_content_type = content_type
+            self._vision["frame_sequence"] = int(self._vision["frame_sequence"]) + 1
+            self._vision["frame_stamp"] = stamp
+
+    def _on_vision_bbox(self, msg: Float32MultiArray) -> None:
+        if len(msg.data) < 10:
+            return
+        values = [float(value) for value in msg.data[:10]]
+        if not all(math.isfinite(value) for value in values):
+            return
+        (
+            stamp,
+            detected,
+            class_id,
+            confidence,
+            center_x,
+            center_y,
+            width,
+            height,
+            image_width,
+            image_height,
+        ) = values
+        now = time.monotonic()
+        with self._lock:
+            self._health["vision_bbox"].tick()
+            previous_stamp = float(self._vision.get("detection_stamp", -1.0))
+            if abs(stamp - previous_stamp) > 1e-6:
+                self._vision["detections"] = {}
+                self._vision["detection_stamp"] = stamp
+            self._vision["frame_width"] = max(0, int(round(image_width)))
+            self._vision["frame_height"] = max(0, int(round(image_height)))
+            if detected >= 0.5 and image_width > 0.0 and image_height > 0.0:
+                class_key = str(int(round(class_id)))
+                self._vision["detections"][class_key] = {
+                    "detected": True,
+                    "class_id": int(round(class_id)),
+                    "confidence": confidence,
+                    "center_x": center_x,
+                    "center_y": center_y,
+                    "width": width,
+                    "height": height,
+                    "image_width": image_width,
+                    "image_height": image_height,
+                    "error_x": (center_x - image_width / 2.0) / (image_width / 2.0),
+                    "error_y": (center_y - image_height / 2.0) / (image_height / 2.0),
+                    "area_ratio": max(0.0, width * height / (image_width * image_height)),
+                    "received_at": now,
+                }
+
+    def _on_vision_enable(self, msg: Bool) -> None:
+        with self._lock:
+            self._health["vision_mission_enable"].tick()
+            self._vision["mission_enabled"] = bool(msg.data)
+
+    def _on_vision_state(self, msg: String) -> None:
+        with self._lock:
+            self._health["vision_mission_state"].tick()
+            self._vision["mission_state"] = str(msg.data or "UNKNOWN")
+
+    def _on_vision_rc_command(self, msg: OverrideRCIn) -> None:
+        with self._lock:
+            self._health["vision_rc_command"].tick()
+            self._vision["rc_channels"] = [int(value) for value in msg.channels]
+
+    def _vision_snapshot_locked(self) -> dict:
+        now = time.monotonic()
+        detections = []
+        for item in self._vision["detections"].values():
+            clean = {key: value for key, value in item.items() if key != "received_at"}
+            clean["age"] = max(0.0, now - float(item["received_at"]))
+            detections.append(clean)
+        detections.sort(key=lambda item: item["class_id"])
+        return {
+            "frame_sequence": int(self._vision["frame_sequence"]),
+            "frame_stamp": float(self._vision["frame_stamp"]),
+            "frame_width": int(self._vision["frame_width"]),
+            "frame_height": int(self._vision["frame_height"]),
+            "detections": detections,
+            "mission_enabled": bool(self._vision["mission_enabled"]),
+            "mission_state": str(self._vision["mission_state"]),
+            "rc_channels": list(self._vision["rc_channels"]),
+        }
+
+    def _on_pinger_homing(self, msg: String) -> None:
+        parsed = _json_object(msg.data)
+        with self._lock:
+            self._health["pinger_homing"].tick()
+            self._pinger_homing_status = {
+                "raw": msg.data[-1600:],
+                "state": str(parsed.get("state", "")) if parsed else "",
+                "dry_run": bool(parsed.get("dry_run", True)) if parsed else True,
+                "control_output_active": (
+                    bool(parsed.get("control_output_active", False)) if parsed else False
+                ),
+                "inputs_ready": bool(parsed.get("inputs_ready", False)) if parsed else False,
+                "connected": bool(parsed.get("connected", False)) if parsed else False,
+                "armed": bool(parsed.get("armed", False)) if parsed else False,
+                "audio_fresh": bool(parsed.get("audio_fresh", False)) if parsed else False,
+                "sample_count": _integer_or_zero(parsed.get("sample_count")) if parsed else 0,
+                "probe_attempt": _integer_or_zero(parsed.get("probe_attempt")) if parsed else 0,
+                "minimum_probe_legs": (
+                    _integer_or_zero(parsed.get("minimum_probe_legs")) if parsed else 0
+                ),
+                "estimated_source_world": parsed.get("estimated_source_world") if parsed else None,
+                "source_locked": bool(parsed.get("source_locked", False)) if parsed else False,
+                "estimated_distance_m": (
+                    _number_or_none(parsed.get("estimated_distance_m")) if parsed else None
+                ),
+                "amplitude_distance_m": (
+                    _number_or_none(parsed.get("amplitude_distance_m")) if parsed else None
+                ),
+                "rms_residual_m": (
+                    _number_or_none(parsed.get("rms_residual_m")) if parsed else None
+                ),
+                "condition_number": (
+                    _number_or_none(parsed.get("condition_number")) if parsed else None
+                ),
+                "bias_range_rate_mps": (
+                    _number_or_none(parsed.get("bias_range_rate_mps")) if parsed else None
+                ),
+                "control_direction_source": (
+                    str(parsed.get("control_direction_source", "")) if parsed else ""
+                ),
+                "command": parsed.get("command", {}) if parsed else {},
+                "requested_command": parsed.get("requested_command", {}) if parsed else {},
+                "depth_safety": parsed.get("depth_safety", {}) if parsed else {},
+                "bearing_error_deg": (
+                    _number_or_none(parsed.get("bearing_error_deg")) if parsed else None
+                ),
+                "range_complete": bool(parsed.get("range_complete", False)) if parsed else False,
+                "arrival_complete": bool(parsed.get("arrival_complete", False)) if parsed else False,
+                "completion_reason": str(parsed.get("completion_reason", "")) if parsed else "",
+                "arrival_radius_m": (
+                    _number_or_none(parsed.get("arrival_radius_m")) if parsed else None
+                ),
+                "active_runtime_s": (
+                    _number_or_none(parsed.get("active_runtime_s")) if parsed else None
+                ),
+                "max_runtime_s": (
+                    _number_or_none(parsed.get("max_runtime_s")) if parsed else None
+                ),
+                "amplitude_range_constant": (
+                    _number_or_none(parsed.get("amplitude_range_constant")) if parsed else None
+                ),
+            }
+
+    def _on_hydrophone_direction(self, msg: Vector3Stamped) -> None:
+        x = msg.vector.x
+        y = msg.vector.y
+        z = msg.vector.z
+        bearing = math.atan2(y, x) if math.isfinite(x) and math.isfinite(y) else None
+        with self._lock:
+            self._health["hydrophone_direction"].tick()
+            self._hydrophone_direction = {
+                "x": _finite_or_none(x),
+                "y": _finite_or_none(y),
+                "z": _finite_or_none(z),
+                "bearing_rad": bearing,
+            }
+
+    def _on_delta_range(self, msg: Float64) -> None:
+        value = _finite_or_none(float(msg.data))
+        with self._lock:
+            self._health["delta_range"].tick()
+            self._delta_range_m = value
+
+    def _on_iq_magnitude(self, msg: Float64) -> None:
+        value = _finite_or_none(float(msg.data))
+        with self._lock:
+            self._health["iq_magnitude"].tick()
+            self._iq_magnitude = value
+
+    def _on_rc_mux_status(self, msg: String) -> None:
+        parsed = _json_object(msg.data)
+        with self._lock:
+            self._health["rc_mux"].tick()
+            self._rc_mux_status = {
+                "owner": str(parsed.get("owner", "unknown")),
+                "conflict": bool(parsed.get("conflict", False)),
+                "output_enabled": bool(parsed.get("output_enabled", False)),
+                "publisher_count": _integer_or_zero(parsed.get("publisher_count")),
+            }
+
     def _append_dvl_event(
         self,
         event_type: str,
@@ -707,7 +1106,6 @@ class LocalizationRosNode(Node):
             latest["ok"] = False
             latest["reason"] = latest.get("reason") or "no recent DVL data"
             return False, latest
-        window_start = now - duration_s
         has_full_window = (now - float(recent[0]["t"])) >= max(
             0.0, duration_s - DVL_TWIST_STALE_AFTER_S)
         latest_is_fresh = now - recent[-1]["t"] <= DVL_TWIST_STALE_AFTER_S
@@ -812,35 +1210,42 @@ class LocalizationRosNode(Node):
 
 
 class RosInterface:
-    def __init__(self):
+    def __init__(self, topic_config: TopicConfig | None = None):
+        self.topic_config = topic_config or TopicConfig()
         self.node: LocalizationRosNode | None = None
         self._executor: SingleThreadedExecutor | None = None
         self._spin_thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
 
     def start(self) -> None:
         if not rclpy.ok():
-            rclpy.init(args=None)
-        self.node = LocalizationRosNode()
+            # FastAPI/launch CLI arguments are not ROS arguments for this node.
+            rclpy.init(args=[])
+        self.node = LocalizationRosNode(self.topic_config)
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self.node)
         self._spin_thread = threading.Thread(target=self._spin, daemon=True)
         self._spin_thread.start()
 
     def _spin(self) -> None:
-        if self._executor is None:
+        executor = self._executor
+        if executor is None:
             return
         try:
-            self._executor.spin()
+            executor.spin()
         except ExternalShutdownException:
             pass
 
     def stop(self) -> None:
-        if self._executor is not None:
-            self._executor.shutdown()
+        with self._state_lock:
+            executor = self._executor
+            node = self.node
             self._executor = None
-        if self.node is not None:
-            self.node.destroy_node()
             self.node = None
+            if executor is not None:
+                executor.shutdown()
+            if node is not None:
+                node.destroy_node()
         if self._spin_thread is not None:
             self._spin_thread.join(timeout=1.0)
             self._spin_thread = None
@@ -848,9 +1253,17 @@ class RosInterface:
             rclpy.shutdown()
 
     def status(self) -> dict:
-        if self.node is None:
-            return {}
-        return self.node.snapshot()
+        with self._state_lock:
+            if self.node is None or not rclpy.ok():
+                return {}
+            try:
+                return self.node.snapshot()
+            except Exception:
+                # SIGINT can invalidate the global ROS context before FastAPI's
+                # shutdown hook closes an already-connected status WebSocket.
+                if not rclpy.ok():
+                    return {}
+                raise
 
     def publish_dvl_command(
         self,
@@ -953,6 +1366,21 @@ class RosInterface:
             raise RuntimeError("ROS interface is not running")
         return self.node.set_mode(mode)
 
+    def latest_vision_frame(self) -> tuple[bytes, str, int]:
+        if self.node is None:
+            return b"", "image/jpeg", 0
+        return self.node.latest_vision_frame()
+
+    def set_vision_control_enabled(self, enabled: bool) -> None:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        self.node.set_vision_control_enabled(enabled)
+
+    def release_vision_control(self) -> None:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        self.node.release_vision_control()
+
 
 def _clamp_axis(value: object) -> float:
     try:
@@ -962,3 +1390,37 @@ def _clamp_axis(value: object) -> float:
     if not math.isfinite(numeric):
         return 0.0
     return max(-1.0, min(1.0, numeric))
+
+
+def _json_object(text: str) -> dict:
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _number_or_none(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _integer_or_zero(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _endpoint_nodes(endpoints: list) -> list[dict[str, str]]:
+    return [
+        {
+            "name": str(endpoint.node_name),
+            "namespace": str(endpoint.node_namespace),
+            "type": str(endpoint.topic_type),
+        }
+        for endpoint in endpoints
+    ]

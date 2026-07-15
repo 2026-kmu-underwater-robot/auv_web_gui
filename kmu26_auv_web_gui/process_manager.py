@@ -64,7 +64,9 @@ class ManagedProcess:
         self._reader_thread.start()
 
     def stop(self) -> None:
-        if self.process is None and self.pgid is None:
+        if self.pgid is None and (
+            self.process is None or self.process.poll() is not None
+        ):
             return
 
         self._log(f"[{self.name}] stopping")
@@ -76,20 +78,31 @@ class ManagedProcess:
                 return
 
         try:
-            _kill_process_group(pgid, signal.SIGTERM)
+            # ROS launch nodes use SIGINT for an orderly shutdown. In
+            # particular, the pinger controller publishes RC channel release
+            # values before its launch group exits.
+            _kill_process_group(pgid, signal.SIGINT)
             if self.process is not None and self.process.poll() is None:
                 self.process.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
-            self._log(f"[{self.name}] force killing")
-            _kill_process_group(pgid, signal.SIGKILL)
-            if self.process is not None:
-                self.process.wait(timeout=2.0)
-            return
+            self._log(f"[{self.name}] graceful stop timed out; terminating")
+            _kill_process_group(pgid, signal.SIGTERM)
+            try:
+                if self.process is not None:
+                    self.process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._log(f"[{self.name}] force killing")
+                _kill_process_group(pgid, signal.SIGKILL)
+                if self.process is not None:
+                    self.process.wait(timeout=2.0)
+                self.pgid = None
+                return
 
         if not _wait_for_process_group_exit(pgid, timeout=2.0):
             self._log(f"[{self.name}] force killing remaining process group {pgid}")
             _kill_process_group(pgid, signal.SIGKILL)
             _wait_for_process_group_exit(pgid, timeout=2.0)
+        self.pgid = None
 
     @property
     def is_running(self) -> bool:
@@ -121,6 +134,8 @@ class ProcessManager:
         dronecan_allocator_node_id: int = 126,
         dronecan_allocator_db: str = "",
         dronecan_python: str = "",
+        pinger_package: str = "kmu26_pinger_homing",
+        pinger_launch: str = "pinger_homing_real.launch.py",
     ):
         self.robot_package = robot_package
         self.robot_launch = robot_launch
@@ -129,9 +144,14 @@ class ProcessManager:
         self.dronecan_allocator_node_id = dronecan_allocator_node_id
         self.dronecan_allocator_db = dronecan_allocator_db
         self.dronecan_python = dronecan_python or _default_dronecan_python()
+        self.pinger_package = pinger_package
+        self.pinger_launch = pinger_launch
         self.logs: deque[str] = deque(maxlen=500)
         self._dronecan_allocator: ManagedProcess | None = None
         self._stack: ManagedProcess | None = None
+        self._vision_yolo: ManagedProcess | None = None
+        self._vision_mission: ManagedProcess | None = None
+        self._pinger: ManagedProcess | None = None
         self._bag: ManagedProcess | None = None
         self._bag_output: str = ""
 
@@ -171,10 +191,71 @@ class ProcessManager:
         self._stack = ManagedProcess("localization_test", cmd, self.logs)
         self._stack.start()
 
+    def start_pinger(self, launch_args: dict[str, str] | None = None) -> None:
+        if self._pinger and self._pinger.is_running:
+            raise RuntimeError("pinger homing is already running")
+        args = {
+            "dry_run": "true",
+            "use_audio_capture": "false",
+            "use_hydrophone_estimator": "true",
+            "use_rc_mux": "true",
+        }
+        args.update(launch_args or {})
+        cmd = ["ros2", "launch", self.pinger_package, self.pinger_launch]
+        for key, value in args.items():
+            if value != "":
+                cmd.append(f"{key}:={value}")
+        self._pinger = ManagedProcess("pinger_homing", cmd, self.logs)
+        self._pinger.start()
+
+    def stop_pinger(self) -> None:
+        if self._pinger:
+            self._pinger.stop()
+
     def stop_stack(self) -> None:
         if self._stack:
             self._stack.stop()
         self._stop_orphaned_stack_groups()
+
+    def start_vision_yolo(self, launch_args: dict[str, str] | None = None) -> None:
+        if self.vision_yolo_running:
+            raise RuntimeError("vision YOLO detector is already running")
+        self._vision_yolo = ManagedProcess(
+            "vision_yolo",
+            _ros2_launch_command(
+                "auv_buoy_vision_control",
+                "laptop_yolo_detection.launch.py",
+                launch_args,
+            ),
+            self.logs,
+        )
+        self._vision_yolo.start()
+
+    def stop_vision_yolo(self) -> None:
+        if self._vision_yolo:
+            self._vision_yolo.stop()
+
+    def start_vision_mission(self, launch_args: dict[str, str] | None = None) -> None:
+        if self.vision_mission_running:
+            raise RuntimeError("vision mission controller is already running")
+        self._vision_mission = ManagedProcess(
+            "vision_mission",
+            _ros2_launch_command(
+                "auv_buoy_vision_control",
+                "auv_bbox_controller.launch.py",
+                launch_args,
+            ),
+            self.logs,
+        )
+        self._vision_mission.start()
+
+    def stop_vision_mission(self) -> None:
+        if self._vision_mission:
+            self._vision_mission.stop()
+
+    def stop_vision(self) -> None:
+        self.stop_vision_mission()
+        self.stop_vision_yolo()
 
     def restart_localization_filter(self) -> dict:
         groups = self._stack_process_groups()
@@ -275,6 +356,9 @@ class ProcessManager:
             "dronecan_allocator_enabled": self.start_dronecan_allocator_on_startup,
             "dronecan_allocator_running": self.dronecan_allocator_running,
             "stack_running": self.stack_running,
+            "vision_yolo_running": self.vision_yolo_running,
+            "vision_mission_running": self.vision_mission_running,
+            "pinger_running": bool(self._pinger and self._pinger.is_running),
             "bag_running": bool(self._bag and self._bag.is_running),
             "bag_output": self._bag_output,
             "logs": list(self.logs)[-80:],
@@ -282,6 +366,8 @@ class ProcessManager:
 
     def stop_all(self) -> None:
         self.stop_bag()
+        self.stop_vision()
+        self.stop_pinger()
         self.stop_stack()
         self.stop_dronecan_allocator()
 
@@ -292,6 +378,14 @@ class ProcessManager:
     @property
     def dronecan_allocator_running(self) -> bool:
         return bool(self._dronecan_allocator and self._dronecan_allocator.is_running)
+
+    @property
+    def vision_yolo_running(self) -> bool:
+        return bool(self._vision_yolo and self._vision_yolo.is_running)
+
+    @property
+    def vision_mission_running(self) -> bool:
+        return bool(self._vision_mission and self._vision_mission.is_running)
 
     def stop_dronecan_allocator(self) -> None:
         if self._dronecan_allocator:
@@ -340,6 +434,19 @@ def _matching_launch_process_groups(robot_package: str, robot_launch: str) -> se
         except ProcessLookupError:
             continue
     return groups
+
+
+def _ros2_launch_command(
+    package: str,
+    launch_file: str,
+    launch_args: dict[str, str] | None,
+) -> list[str]:
+    cmd = ["ros2", "launch", package, launch_file]
+    for key, value in (launch_args or {}).items():
+        clean_value = str(value)
+        if clean_value != "":
+            cmd.append(f"{key}:={clean_value}")
+    return cmd
 
 
 def _is_matching_ros2_launch(

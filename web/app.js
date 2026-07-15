@@ -51,10 +51,22 @@ const state = {
       yaw: 0,
     },
   },
+  vision: {
+    visible: false,
+    frameTimer: null,
+    frameLoading: false,
+    frameSequence: 0,
+    frameImage: null,
+    detections: [],
+    process: {},
+    topics: {},
+    status: {},
+  },
 };
 
 const $ = (id) => document.getElementById(id);
 const BAG_SELECTION_KEY = "kmu26-auv-web-gui-bag-selection";
+const VISION_CONFIG_KEY = "kmu26-auv-web-gui-vision-config";
 
 function fmt(value, digits = 2) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "--";
@@ -70,6 +82,157 @@ function fmtPercent(value, digits = 1) {
   return typeof value === "number" && Number.isFinite(value)
     ? `${(value * 100).toFixed(digits)} %`
     : "--";
+}
+
+function inputNumber(id, fallback) {
+  const value = Number($(id).value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function pingerPayload(dryRun) {
+  return {
+    dry_run: dryRun,
+    confirm_live: !dryRun,
+    use_hydrophone_estimator: $("pinger-use-estimator").checked,
+    use_audio_capture: $("pinger-use-capture").checked,
+    audio_device: $("pinger-audio-device").value.trim(),
+    reference_frequency_hz: inputNumber("pinger-reference-frequency", 21164),
+    tank_max_depth_m: inputNumber("pinger-tank-depth", 11),
+    rate_hz: inputNumber("pinger-rate", 30),
+    forward_max: inputNumber("pinger-forward-max", 0.48),
+    yaw_gain: inputNumber("pinger-yaw-gain", 0.85),
+    yaw_command_limit: inputNumber("pinger-yaw-limit", 0.42),
+    arrival_radius_m: inputNumber("pinger-arrival-radius", 1.5),
+    arrival_hold_s: inputNumber("pinger-arrival-hold", 1.0),
+    max_runtime_s: inputNumber("pinger-max-runtime", 180),
+    success_hold_s: inputNumber("pinger-success-hold", 0.8),
+    success_range_m: inputNumber("pinger-success-range", 0),
+    amplitude_range_constant: inputNumber("pinger-range-constant", 0),
+  };
+}
+
+function pingerParameterInputs() {
+  return Array.from(document.querySelectorAll("[data-pinger-param]"));
+}
+
+function validatePingerParameters({ focusInvalid = true } = {}) {
+  const successRange = $("pinger-success-range");
+  const rangeConstant = $("pinger-range-constant");
+  const successRangeValue = Number(successRange.value);
+  const rangeConstantValue = Number(rangeConstant.value);
+
+  rangeConstant.setCustomValidity("");
+  if (successRangeValue > 0 && !(rangeConstantValue > 0)) {
+    rangeConstant.setCustomValidity(
+      "Success range를 사용하려면 실측한 IQ range constant를 0보다 크게 입력하십시오.",
+    );
+  }
+
+  const inputs = pingerParameterInputs();
+  inputs.forEach((input) => {
+    input.setAttribute("aria-invalid", String(!input.checkValidity()));
+  });
+  const invalid = inputs.find((input) => !input.checkValidity());
+  if (invalid && focusInvalid) {
+    const details = invalid.closest("details");
+    if (details) details.open = true;
+    invalid.focus();
+    invalid.reportValidity();
+  }
+  return !invalid;
+}
+
+function pingerParameterNumber(id) {
+  const text = $(id).value.trim();
+  if (!text) return null;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : null;
+}
+
+function renderPingerParameterSummary() {
+  const tankDepth = pingerParameterNumber("pinger-tank-depth");
+  const forwardMax = pingerParameterNumber("pinger-forward-max");
+  const yawLimit = pingerParameterNumber("pinger-yaw-limit");
+  const arrivalRadius = pingerParameterNumber("pinger-arrival-radius");
+  const arrivalHold = pingerParameterNumber("pinger-arrival-hold");
+  const maxRuntime = pingerParameterNumber("pinger-max-runtime");
+  const successRange = pingerParameterNumber("pinger-success-range");
+  const chip = (label, value, className = "") =>
+    `<span class="${className}">${escapeHtml(label)} <strong>${escapeHtml(value)}</strong></span>`;
+
+  $("pinger-parameter-summary").innerHTML = [
+    chip("Tank", tankDepth === null ? "--" : `${tankDepth.toFixed(1)} m`),
+    chip("Forward", forwardMax === null ? "--" : `${Math.round(forwardMax * 100)}%`),
+    chip("Yaw limit", yawLimit === null ? "--" : `${Math.round(yawLimit * 100)}%`),
+    chip(
+      "Arrival",
+      arrivalRadius === null || arrivalHold === null
+        ? "--"
+        : `${arrivalRadius.toFixed(1)} m / ${arrivalHold.toFixed(1)} s`,
+    ),
+    chip("Runtime", maxRuntime === null ? "--" : `${Math.round(maxRuntime)} s`),
+    successRange > 0
+      ? chip("Range stop", `${successRange.toFixed(1)} m`)
+      : chip("Range stop", "OFF", "off"),
+  ].join("");
+}
+
+function syncPingerParameterUi({ markPreflightStale = false } = {}) {
+  validatePingerParameters({ focusInvalid: false });
+  const inputs = pingerParameterInputs();
+  const changed = inputs.filter((input) => input.value !== input.defaultValue);
+  const invalid = inputs.filter((input) => !input.checkValidity());
+
+  inputs.forEach((input) => {
+    input.closest("label")?.classList.toggle("changed", input.value !== input.defaultValue);
+  });
+
+  const indicator = $("pinger-parameter-state");
+  indicator.classList.toggle("changed", invalid.length === 0 && changed.length > 0);
+  indicator.classList.toggle("invalid", invalid.length > 0);
+  if (invalid.length > 0) {
+    indicator.textContent = `${invalid.length} invalid value${invalid.length === 1 ? "" : "s"}`;
+  } else if (changed.length > 0) {
+    indicator.textContent = `${changed.length} change${changed.length === 1 ? "" : "s"} · next start`;
+  } else {
+    indicator.textContent = "Defaults loaded";
+  }
+
+  renderPingerParameterSummary();
+  if (markPreflightStale) {
+    const preflight = $("pinger-preflight-result");
+    preflight.textContent = "Parameters changed · run preflight again";
+    preflight.classList.remove("good");
+    preflight.classList.add("warn");
+  }
+}
+
+function resetPingerParameters() {
+  pingerParameterInputs().forEach((input) => {
+    input.value = input.defaultValue;
+  });
+  syncPingerParameterUi({ markPreflightStale: true });
+}
+
+function pingerRequest(path, dryRun, onSuccess = null) {
+  if (!validatePingerParameters()) {
+    syncPingerParameterUi({ markPreflightStale: true });
+    showError(new Error("Fix invalid Pinger parameters before continuing."));
+    return;
+  }
+  const request = postJson(path, pingerPayload(dryRun));
+  if (onSuccess) request.then(onSuccess).catch(showError);
+  else request.catch(showError);
+}
+
+function bindPingerParameterControls() {
+  pingerParameterInputs().forEach((input) => {
+    input.addEventListener("input", () => {
+      syncPingerParameterUi({ markPreflightStale: true });
+    });
+  });
+  $("pinger-parameter-reset").addEventListener("click", resetPingerParameters);
+  syncPingerParameterUi();
 }
 
 function escapeHtml(value) {
@@ -132,11 +295,46 @@ async function getJson(path) {
 }
 
 function bindControls() {
+  bindPingerParameterControls();
   $("start-stack").addEventListener("click", () => {
     postJson("/api/stack/start").catch(showError);
   });
   $("stop-stack").addEventListener("click", () => {
     postJson("/api/stack/stop").catch(showError);
+  });
+  $("start-pinger-dry").addEventListener("click", () => {
+    pingerRequest("/api/pinger/start", true);
+  });
+  $("pinger-preflight").addEventListener("click", () => {
+    pingerRequest("/api/pinger/preflight", false, renderPingerPreflight);
+  });
+  $("pinger-set-mode").addEventListener("click", () => {
+    postJson("/api/pinger/mode", { mode: $("pinger-mode").value }).catch(showError);
+  });
+  $("pinger-arm").addEventListener("click", () => {
+    if (!window.confirm("ARM the physical vehicle? Keep the area and propellers clear.")) return;
+    postJson("/api/pinger/arm", { armed: true }).catch(showError);
+  });
+  $("pinger-disarm").addEventListener("click", () => {
+    postJson("/api/pinger/arm", { armed: false }).catch(showError);
+  });
+  $("start-pinger-live").addEventListener("click", () => {
+    if (!validatePingerParameters()) {
+      syncPingerParameterUi({ markPreflightStale: true });
+      showError(new Error("Fix invalid Pinger parameters before continuing."));
+      return;
+    }
+    if (
+      !window.confirm(
+        "Enable real pinger-homing RC output? The controller will command MAVROS only while the vehicle reports ARMED.",
+      )
+    ) {
+      return;
+    }
+    pingerRequest("/api/pinger/start", false);
+  });
+  $("stop-pinger").addEventListener("click", () => {
+    postJson("/api/pinger/stop").catch(showError);
   });
   $("start-bag").addEventListener("click", () => {
     startBag().catch(showError);
@@ -189,6 +387,7 @@ function bindControls() {
 
   bindPathControls();
   bindWebControl();
+  bindVisionControls();
 }
 
 function showTab(name) {
@@ -203,6 +402,13 @@ function showTab(name) {
   }
   if (name === "bag" && !state.bag.topicsLoaded) {
     loadBagTopics().catch(showError);
+  }
+  state.vision.visible = name === "vision";
+  if (state.vision.visible) {
+    startVisionFrameLoop();
+    renderVisionCanvas();
+  } else {
+    stopVisionFrameLoop();
   }
 }
 
@@ -245,8 +451,16 @@ function renderStatus(payload) {
   const webControl = ros.web_control || {};
   const dvlConfig = ros.dvl_config || {};
   const dvlEvents = ros.dvl_events || [];
+  const vision = ros.vision || {};
 
   setPill("stack-pill", process.stack_running, process.stack_running ? "STACK ON" : "STACK OFF");
+  const pingerAlive = Boolean(process.pinger_running && topics.pinger_homing?.alive);
+  const pingerMode = ros.pinger_homing_status?.dry_run ? "DRY" : "LIVE";
+  setPill(
+    "pinger-pill",
+    pingerAlive,
+    process.pinger_running ? `PINGER ${pingerAlive ? pingerMode : "WAIT"}` : "PINGER OFF",
+  );
   renderMavrosPill(mavrosState, topics.mavros_state);
   setPill("bag-pill", process.bag_running, process.bag_running ? "BAG ON" : "BAG OFF");
   setPill("joy-pill", topics.joy?.alive, topics.joy?.alive ? "JOY ON" : "JOY OFF");
@@ -272,7 +486,9 @@ function renderStatus(payload) {
   renderTestState();
   renderBag(process);
   renderTopics(topics);
+  renderPinger(process, ros);
   renderWebControlStatus(webControl);
+  renderVision(process, topics, vision, depth);
   state.path.points = ros.path || [];
   state.path.pose = {
     x: typeof pose.x === "number" ? pose.x : 0,
@@ -566,6 +782,91 @@ function triggerAmount(axes, index) {
   // DualShock triggers commonly report 1.0 at rest and -1.0 when fully pressed.
   if (value < -0.05) return (1 - value) / 2;
   return 0;
+}
+
+function formatCommand(command) {
+  if (!command || typeof command !== "object") return "--";
+  return `F ${fmt(command.forward)} | L ${fmt(command.lateral)} | H ${fmt(command.heave)} | Y ${fmt(command.yaw)}`;
+}
+
+function renderPingerPreflight(result) {
+  const failed = (result.checks || []).filter((check) => !check.ok);
+  $("pinger-preflight-result").textContent = result.ok
+    ? "READY"
+    : failed.map((check) => check.detail).join(" | ") || "NOT READY";
+  $("pinger-preflight-result").classList.toggle("good", Boolean(result.ok));
+  $("pinger-preflight-result").classList.toggle("warn", !result.ok);
+}
+
+function renderPinger(process, ros) {
+  const pinger = ros.pinger_homing_status || {};
+  const topics = ros.topics || {};
+  const mux = ros.rc_mux_status || {};
+  const graph = ros.graph || {};
+  const depthSafety = pinger.depth_safety || {};
+  const estimate = Array.isArray(pinger.estimated_source_world)
+    ? pinger.estimated_source_world.map((value) => fmt(Number(value))).join(", ")
+    : "--";
+  const actualRange = pinger.amplitude_distance_m ?? pinger.estimated_distance_m;
+
+  $("pinger-process-state").textContent = process.pinger_running ? "running" : "stopped";
+  $("pinger-control-mode").textContent = !process.pinger_running
+    ? "STOPPED"
+    : pinger.dry_run
+      ? "DRY RUN · RC RELEASE"
+      : pinger.control_output_active
+        ? "LIVE · RC ACTIVE"
+        : "LIVE · waiting for ARMED";
+  $("pinger-mux-state").textContent = topics.rc_mux?.alive
+    ? `${mux.owner || "unknown"} | ${
+        mux.conflict ? "CONFLICT" : mux.output_enabled ? "output enabled" : "output blocked"
+      } | pubs ${mux.publisher_count ?? 0}`
+    : `stale | /mavros/rc/override pubs ${graph.rc_output_publishers ?? 0}`;
+  $("pinger-controller-state").textContent = pinger.state || "--";
+  $("pinger-input-state").textContent = [
+    `odom ${topics.odom?.alive ? "OK" : "stale"}`,
+    `mavros ${topics.mavros_state?.alive && pinger.connected ? "OK" : "stale"}`,
+    `audio ${pinger.audio_fresh ? "OK" : "stale"}`,
+    `direction ${topics.hydrophone_direction?.alive ? "OK" : "stale"}`,
+  ].join(" | ");
+  $("pinger-estimate").textContent = `xyz ${estimate} | range ${fmtUnit(actualRange, "m")} | bearing ${fmtUnit(
+    pinger.bearing_error_deg,
+    "deg",
+    1,
+  )}`;
+  $("pinger-quality").textContent = `locked ${pinger.source_locked ? "yes" : "no"} | residual ${fmtUnit(
+    pinger.rms_residual_m,
+    "m",
+    3,
+  )} | cond ${fmt(pinger.condition_number, 1)} | bias ${fmtUnit(pinger.bias_range_rate_mps, "m/s", 3)}`;
+  $("pinger-requested-command").textContent = formatCommand(pinger.requested_command);
+  $("pinger-command").textContent = formatCommand(pinger.command);
+  $("pinger-depth-safety").textContent = `depth ${fmtUnit(depthSafety.vehicle_depth_m, "m")} / ${fmtUnit(
+    depthSafety.max_vehicle_depth_m,
+    "m",
+  )} | probe ${fmt(depthSafety.probe_heave)} | limit ${depthSafety.limit_active ? "ON" : "off"} | recovery ${
+    depthSafety.recovery_active ? "ON" : "off"
+  }`;
+  $("pinger-direction-source").textContent = pinger.control_direction_source || "--";
+  $("pinger-samples").textContent = `${pinger.sample_count ?? 0} samples | probe ${pinger.probe_attempt ?? 0} / ${
+    pinger.minimum_probe_legs ?? 0
+  }`;
+  $("pinger-result").textContent = `arrival ${pinger.arrival_complete ? "complete" : "pending"} | calibrated range ${
+    pinger.range_complete ? "complete" : "pending"
+  } | ${pinger.completion_reason || "running"} | runtime ${fmtUnit(pinger.active_runtime_s, "s", 1)} / ${fmtUnit(
+    pinger.max_runtime_s,
+    "s",
+    0,
+  )} | IQ K ${fmt(pinger.amplitude_range_constant, 3)}`;
+  $("pinger-log-output").textContent = (process.logs || [])
+    .filter(
+      (line) =>
+        line.includes("[pinger_homing]") ||
+        line.includes("single_hydrophone_homing") ||
+        line.includes("pinger_hydrophone") ||
+        line.includes("rc_override_mux"),
+    )
+    .join("\n");
 }
 
 function renderBag(process) {
@@ -1073,7 +1374,9 @@ function dvlConfigPayload(config) {
 }
 
 function renderTopics(topics) {
-  const rows = Object.values(topics).map((topic) => {
+  const rows = Object.entries(topics)
+    .filter(([name]) => !name.startsWith("vision_"))
+    .map(([, topic]) => {
     const age = typeof topic.age === "number" ? `${fmt(topic.age, 2)}s` : "--";
     const hz = `${fmt(topic.hz, 1)} Hz`;
     const cls = topic.alive ? "alive" : "stale";
@@ -1082,7 +1385,7 @@ function renderTopics(topics) {
         <strong>${topic.name}</strong>
         <span>${topic.alive ? "alive" : "stale"} · ${hz} · age ${age}</span>
       </div>`;
-  });
+    });
   $("topic-list").innerHTML = rows.join("");
 }
 
@@ -1350,6 +1653,339 @@ function drawRobotMarker(ctx, pose, view) {
   ctx.fill();
   ctx.stroke();
   ctx.restore();
+}
+
+function bindVisionControls() {
+  loadVisionConfig();
+  document.querySelectorAll("[data-vision-yolo], [data-vision-mission]").forEach((input) => {
+    input.addEventListener("change", saveVisionConfig);
+  });
+
+  $("vision-start-yolo").addEventListener("click", () => {
+    startVisionYolo().catch(showError);
+  });
+  $("vision-stop-yolo").addEventListener("click", () => {
+    postJson("/api/vision/yolo/stop").catch(showError);
+  });
+  $("vision-start-mission").addEventListener("click", () => {
+    startVisionMission().catch(showError);
+  });
+  $("vision-stop-mission").addEventListener("click", () => {
+    postJson("/api/vision/mission/stop").catch(showError);
+  });
+  $("vision-start-all").addEventListener("click", () => {
+    startVisionStack().catch(showError);
+  });
+  $("vision-stop-all").addEventListener("click", () => {
+    postJson("/api/vision/stop").catch(showError);
+  });
+  $("vision-enable-control").addEventListener("click", () => {
+    toggleVisionControl().catch(showError);
+  });
+  $("vision-emergency-stop").addEventListener("click", () => {
+    postJson("/api/vision/emergency_stop").catch(showError);
+  });
+  window.addEventListener("resize", renderVisionCanvas);
+  renderVisionRcChannels([]);
+}
+
+function visionLaunchArgs(attribute) {
+  const args = {};
+  document.querySelectorAll(`[${attribute}]`).forEach((input) => {
+    const key = input.getAttribute(attribute);
+    if (!key) return;
+    args[key] = input.type === "checkbox" ? String(input.checked) : input.value.trim();
+  });
+  return args;
+}
+
+async function startVisionYolo() {
+  saveVisionConfig();
+  return postJson("/api/vision/yolo/start", {
+    launch_args: visionLaunchArgs("data-vision-yolo"),
+  });
+}
+
+async function startVisionMission() {
+  saveVisionConfig();
+  return postJson("/api/vision/mission/start", {
+    launch_args: visionLaunchArgs("data-vision-mission"),
+  });
+}
+
+async function startVisionStack() {
+  saveVisionConfig();
+  if (!state.vision.process.vision_yolo_running) {
+    await startVisionYolo();
+  }
+  if (!state.vision.process.vision_mission_running) {
+    await startVisionMission();
+  }
+}
+
+async function toggleVisionControl() {
+  const enabled = Boolean(state.vision.status.mission_enabled);
+  if (!enabled) {
+    const accepted = window.confirm(
+      "Enable autonomous mission control? Verify camera, depth sign, MAVROS mode, and PWM direction first.",
+    );
+    if (!accepted) return;
+  }
+  await postJson("/api/vision/control", { enabled: !enabled });
+}
+
+function saveVisionConfig() {
+  const values = {};
+  document.querySelectorAll("[data-vision-yolo], [data-vision-mission]").forEach((input) => {
+    const group = input.hasAttribute("data-vision-yolo") ? "yolo" : "mission";
+    const name = input.getAttribute(`data-vision-${group}`);
+    values[`${group}.${name}`] = input.type === "checkbox" ? input.checked : input.value;
+  });
+  localStorage.setItem(VISION_CONFIG_KEY, JSON.stringify(values));
+}
+
+function loadVisionConfig() {
+  let values = {};
+  try {
+    values = JSON.parse(localStorage.getItem(VISION_CONFIG_KEY) || "{}");
+  } catch (_) {
+    values = {};
+  }
+  Object.entries(values).forEach(([key, value]) => {
+    const [group, name] = key.split(".", 2);
+    const input = document.querySelector(`[data-vision-${group}="${name}"]`);
+    if (!input) return;
+    if (input.type === "checkbox") input.checked = Boolean(value);
+    else input.value = value;
+  });
+}
+
+function startVisionFrameLoop() {
+  if (state.vision.frameTimer) return;
+  refreshVisionFrame().catch(showThrottledVisionError);
+  state.vision.frameTimer = window.setInterval(() => {
+    refreshVisionFrame().catch(showThrottledVisionError);
+  }, 100);
+}
+
+function stopVisionFrameLoop() {
+  if (!state.vision.frameTimer) return;
+  window.clearInterval(state.vision.frameTimer);
+  state.vision.frameTimer = null;
+}
+
+async function refreshVisionFrame() {
+  if (state.vision.frameLoading || !state.vision.visible) return;
+  state.vision.frameLoading = true;
+  try {
+    const response = await fetch(`/api/vision/frame?after=${state.vision.frameSequence}`, {
+      cache: "no-store",
+    });
+    if (response.status === 204) return;
+    if (!response.ok) throw new Error(`vision frame failed: ${response.status}`);
+    const sequence = Number(response.headers.get("X-Vision-Frame-Sequence") || 0);
+    const blob = await response.blob();
+    const image = await decodeVisionImage(blob);
+    if (state.vision.frameImage?.close) state.vision.frameImage.close();
+    state.vision.frameImage = image;
+    state.vision.frameSequence = sequence;
+    $("vision-feed-empty").classList.add("hidden");
+    renderVisionCanvas();
+  } finally {
+    state.vision.frameLoading = false;
+  }
+}
+
+async function decodeVisionImage(blob) {
+  if (window.createImageBitmap) return window.createImageBitmap(blob);
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    return image;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function renderVision(process, topics, vision, depth) {
+  state.vision.process = process;
+  state.vision.topics = topics;
+  state.vision.status = vision;
+  state.vision.detections = vision.detections || [];
+
+  const annotatedFeedAlive = Boolean(topics.vision_camera?.alive);
+  const bboxAlive = Boolean(topics.vision_bbox?.alive);
+  const yoloRunning = Boolean(process.vision_yolo_running);
+  const missionRunning = Boolean(process.vision_mission_running);
+  const missionAlive = Boolean(topics.vision_mission_state?.alive)
+    || (vision.mission_state && vision.mission_state !== "UNKNOWN" && topics.vision_rc_command?.alive);
+  const controlEnabled = Boolean(vision.mission_enabled);
+
+  setPillState(
+    "vision-camera-pill",
+    annotatedFeedAlive ? "YOLO FEED LIVE" : yoloRunning ? "YOLO FEED WAIT" : "YOLO FEED OFF",
+    annotatedFeedAlive ? "good" : "warn",
+  );
+  setPillState(
+    "vision-yolo-pill",
+    bboxAlive ? (yoloRunning ? "YOLO LOCAL" : "YOLO DDS") : yoloRunning ? "YOLO WAIT" : "YOLO OFF",
+    bboxAlive ? "good" : yoloRunning ? "warn" : "bad",
+  );
+  setPillState(
+    "vision-mission-pill",
+    missionAlive ? (missionRunning ? "MISSION LOCAL" : "MISSION DDS") : missionRunning ? "MISSION WAIT" : "MISSION OFF",
+    missionAlive ? "good" : missionRunning ? "warn" : "bad",
+  );
+  setPillState(
+    "vision-control-pill",
+    controlEnabled ? "AUTO CONTROL ON" : "CONTROL OFF",
+    controlEnabled ? "bad" : "warn",
+  );
+
+  const missionState = vision.mission_state || "UNKNOWN";
+  $("vision-state-value").textContent = missionState;
+  $("vision-state-age").textContent = topicAgeText(topics.vision_mission_state);
+  document.querySelectorAll("[data-vision-state]").forEach((item) => {
+    const active = item.dataset.visionState === missionState;
+    item.classList.toggle("active", active);
+    item.classList.toggle("failsafe", active && missionState === "FAILSAFE");
+  });
+
+  const depthScale = Number(document.querySelector('[data-vision-mission="depth_pose_scale"]').value);
+  const depthOffset = Number(document.querySelector('[data-vision-mission="depth_pose_offset_m"]').value);
+  const missionDepth = typeof depth.z === "number"
+    ? depth.z * depthScale + depthOffset
+    : null;
+  $("vision-depth-value").textContent = fmtUnit(missionDepth, "m");
+  renderVisionDetections(state.vision.detections, bboxAlive);
+  renderVisionRcChannels(vision.rc_channels || []);
+  renderVisionCanvas();
+
+  $("vision-start-yolo").disabled = yoloRunning;
+  $("vision-stop-yolo").disabled = !yoloRunning;
+  $("vision-start-mission").disabled = missionRunning;
+  $("vision-stop-mission").disabled = !missionRunning;
+  $("vision-start-all").disabled = yoloRunning && missionRunning;
+  $("vision-stop-all").disabled = !yoloRunning && !missionRunning;
+  $("vision-enable-control").textContent = controlEnabled ? "Disable Auto Mission" : "Enable Auto Mission";
+  $("vision-enable-control").classList.toggle("danger", controlEnabled);
+
+  const logs = (process.logs || []).filter(
+    (line) => line.includes("[vision_") || line.includes("auv_buoy_vision_control"),
+  );
+  $("vision-log-output").textContent = logs.slice(-80).join("\n") || "Vision process logs will appear here.";
+
+  const frameSize = vision.frame_width && vision.frame_height
+    ? `${vision.frame_width}x${vision.frame_height}`
+    : "--";
+  $("vision-frame-meta").textContent = annotatedFeedAlive
+    ? `${frameSize} · frame ${vision.frame_sequence || 0} · ${fmt(topics.vision_camera?.hz, 1)} Hz`
+    : "Waiting for completed YOLO frame";
+}
+
+function topicAgeText(topic) {
+  if (!topic || typeof topic.age !== "number") return "No topic";
+  return `${fmt(topic.age, 2)} s ago · ${fmt(topic.hz, 1)} Hz`;
+}
+
+function renderVisionDetections(detections, bboxAlive) {
+  const fresh = detections.filter((item) => typeof item.age !== "number" || item.age <= 1.5);
+  const buoyClass = Number($("vision-buoy-class").value);
+  const stickClass = Number($("vision-stick-class").value);
+  if (!fresh.length) {
+    $("vision-detections").innerHTML = `<div class="vision-detection-empty">${bboxAlive ? "YOLO active · no target" : "No YOLO bbox topic"}</div>`;
+    $("vision-detection-value").textContent = bboxAlive ? "NO TARGET" : "OFFLINE";
+    $("vision-error-value").textContent = "--";
+    $("vision-area-value").textContent = "--";
+    return;
+  }
+
+  const classLabel = (classId) => {
+    if (classId === buoyClass) return "BUOY";
+    if (classId === stickClass) return "STICK";
+    return `CLASS ${classId}`;
+  };
+  $("vision-detections").innerHTML = fresh.map((item) => `
+    <div class="vision-detection-card">
+      <strong>${classLabel(item.class_id)}</strong><strong>${fmtPercent(item.confidence, 1)}</strong>
+      <span>error x/y</span><span>${fmt(item.error_x, 3)} / ${fmt(item.error_y, 3)}</span>
+      <span>area</span><span>${fmtPercent(item.area_ratio, 2)}</span>
+    </div>
+  `).join("");
+  const target = fresh[0];
+  $("vision-detection-value").textContent = `${classLabel(target.class_id)} ${fmtPercent(target.confidence, 1)}`;
+  $("vision-error-value").textContent = `${fmt(target.error_x, 3)}, ${fmt(target.error_y, 3)}`;
+  $("vision-area-value").textContent = fmtPercent(target.area_ratio, 2);
+}
+
+function renderVisionRcChannels(channels) {
+  const configuredControls = [
+    { parameter: "throttle_channel", fallback: 3, label: "Vertical" },
+    { parameter: "yaw_channel", fallback: 4, label: "Yaw" },
+    { parameter: "forward_channel", fallback: 5, label: "Forward" },
+  ];
+  const labelsByChannel = new Map(configuredControls.map((item) => {
+    const input = document.querySelector(`[data-vision-mission="${item.parameter}"]`);
+    const configuredChannel = Number(input?.value);
+    const channel = Number.isInteger(configuredChannel) && configuredChannel >= 1 && configuredChannel <= 18
+      ? configuredChannel
+      : item.fallback;
+    return [channel, item.label];
+  }));
+  $("vision-rc-grid").innerHTML = Array.from({ length: 18 }, (_, index) => {
+    const channel = index + 1;
+    const label = labelsByChannel.get(channel) || "RC Channel";
+    const receivedValue = channels[channel - 1];
+    const value = typeof receivedValue === "number" ? Math.round(receivedValue) : null;
+    const isPwm = value !== null && value !== 0 && value !== 65535;
+    let displayValue = value === null ? "--" : String(value);
+    let detail = "NO MESSAGE";
+    if (value === 0) {
+      displayValue = "RELEASE";
+      detail = "RAW 0";
+    } else if (value === 65535) {
+      displayValue = "NO COMMAND";
+      detail = "RAW 65535";
+    } else if (isPwm) detail = "PWM µs";
+    return `
+      <div class="vision-rc-channel ${isPwm ? "command" : "special"} ${labelsByChannel.has(channel) ? "controlled" : ""}">
+        <span>${label} · CH${channel}</span>
+        <strong>${displayValue}</strong>
+        <small>${detail}</small>
+      </div>
+    `;
+  }).join("");
+  $("vision-rc-meta").textContent = channels.length
+    ? topicAgeText(state.vision.topics.vision_rc_command)
+    : "No output";
+}
+
+function renderVisionCanvas() {
+  const canvas = $("vision-canvas");
+  const ctx = canvas.getContext("2d");
+  const image = state.vision.frameImage;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!image) return;
+
+  const imageWidth = image.width || image.naturalWidth;
+  const imageHeight = image.height || image.naturalHeight;
+  if (!imageWidth || !imageHeight) return;
+  const scale = Math.min(canvas.width / imageWidth, canvas.height / imageHeight);
+  const drawWidth = imageWidth * scale;
+  const drawHeight = imageHeight * scale;
+  const offsetX = (canvas.width - drawWidth) / 2;
+  const offsetY = (canvas.height - drawHeight) / 2;
+  ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
+}
+
+function showThrottledVisionError(error) {
+  const now = Date.now();
+  if (!state.vision.lastErrorAt || now - state.vision.lastErrorAt > 3000) {
+    state.vision.lastErrorAt = now;
+    showError(error);
+  }
 }
 
 function showError(error) {

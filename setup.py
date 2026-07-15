@@ -32,7 +32,7 @@ setup(
     zip_safe=True,
     maintainer="kuuve",
     maintainer_email="kuuve@todo.todo",
-    description="Web control panel for AUV localization tests.",
+    description="Web control panel for AUV localization tests and pinger homing.",
     license="TODO: License declaration",
     tests_require=["pytest"],
     entry_points={
