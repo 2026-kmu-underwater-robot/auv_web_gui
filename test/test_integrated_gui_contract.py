@@ -75,6 +75,21 @@ def test_vision_and_pinger_tabs_are_siblings_and_script_is_loaded_once() -> None
     assert len(parser.ids) == len(set(parser.ids))
 
 
+def test_pinger_parameter_controls_and_css_contract_are_complete() -> None:
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+    javascript = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert html.count("data-pinger-param") == 13
+    assert 'id="pinger-parameter-reset"' in html
+    assert 'id="pinger-parameter-summary"' in html
+    assert css.count("{") == css.count("}")
+    assert ".vision-log-output" in css
+    assert ".pinger-parameter-groups" in css
+    assert "function validatePingerParameters" in javascript
+    assert "bindPingerParameterControls();" in javascript
+
+
 def test_ros_bridge_keeps_pinger_subscription_separate_and_owns_no_final_rc() -> None:
     owned_context = not rclpy.ok()
     if owned_context:

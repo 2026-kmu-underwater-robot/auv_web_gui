@@ -1623,6 +1623,8 @@ pre {
   margin-top: 14px;
   border-top: 1px solid var(--border);
   padding-top: 12px;
+}
+
 .pinger-grid {
   grid-template-columns: 1.2fr 0.8fr;
 }
@@ -1655,28 +1657,186 @@ pre {
   padding: 0 12px;
   background: #141b18;
   font-weight: 700;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
 }
 
-.field-grid {
+.check-field:hover,
+.check-field:focus-within {
+  border-color: color-mix(in srgb, var(--accent), transparent 25%);
+  background: #19231f;
+}
+
+.check-field input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--good);
+  cursor: pointer;
+}
+
+.pinger-parameters {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.pinger-parameter-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.pinger-parameter-header h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.pinger-parameter-header p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pinger-parameter-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.pinger-parameter-actions button {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.pinger-parameter-state {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.pinger-parameter-state.changed {
+  border-color: color-mix(in srgb, var(--warn), transparent 35%);
+  color: var(--warn);
+}
+
+.pinger-parameter-state.invalid {
+  border-color: color-mix(in srgb, var(--bad), transparent 25%);
+  color: var(--bad);
+}
+
+.pinger-parameter-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.pinger-parameter-summary span {
+  border: 1px solid #2d463a;
+  border-radius: 999px;
+  padding: 6px 9px;
+  background: #101813;
+  color: #c7d7cf;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pinger-parameter-summary span.off {
+  border-color: color-mix(in srgb, var(--warn), transparent 55%);
+  color: var(--warn);
+}
+
+.pinger-parameter-groups {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: 1.15fr 0.8fr 1.2fr;
   gap: 10px;
   margin-top: 12px;
 }
 
-.field-grid label {
-  display: grid;
-  gap: 7px;
+.pinger-parameter-group {
+  min-width: 0;
+  margin: 0;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px;
-  background: #141b18;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
+  border-radius: 7px;
+  padding: 12px;
+  background: #121915;
 }
 
-.field-grid input,
+.pinger-parameter-group legend {
+  padding: 0 6px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.pinger-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pinger-motion-grid {
+  grid-template-columns: 1fr;
+}
+
+.pinger-parameter-grid label {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px;
+  background: #141b18;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    transform 140ms ease;
+}
+
+.pinger-parameter-grid label:hover {
+  border-color: color-mix(in srgb, var(--accent), transparent 42%);
+  background: #18231e;
+  transform: translateY(-1px);
+}
+
+.pinger-parameter-grid label:focus-within {
+  border-color: var(--accent);
+  background: #192620;
+  box-shadow: 0 0 0 2px rgba(110, 198, 255, 0.12);
+}
+
+.pinger-parameter-grid label.changed {
+  border-color: color-mix(in srgb, var(--warn), transparent 35%);
+}
+
+.pinger-parameter-grid label.changed > span::after {
+  content: " • changed";
+  color: var(--warn);
+  font-size: 9px;
+}
+
+.pinger-parameter-grid label small {
+  min-height: 13px;
+  color: #718078;
+  font-size: 9px;
+  font-weight: 550;
+  line-height: 1.35;
+}
+
+.pinger-parameter-grid input,
 .pinger-option-row select {
   width: 100%;
   min-height: 36px;
@@ -1686,6 +1846,58 @@ pre {
   background: #0e1311;
   color: var(--text);
   font: inherit;
+  font-variant-numeric: tabular-nums;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.pinger-parameter-grid input:hover,
+.pinger-option-row select:hover {
+  border-color: color-mix(in srgb, var(--accent), transparent 40%);
+}
+
+.pinger-parameter-grid input:focus-visible,
+.pinger-option-row select:focus-visible,
+.check-field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.pinger-parameter-grid input:invalid {
+  border-color: var(--bad);
+  background: color-mix(in srgb, var(--bad), #0e1311 93%);
+}
+
+.pinger-calibration {
+  margin-top: 9px;
+  border-top: 1px solid var(--border);
+  padding-top: 9px;
+}
+
+.pinger-calibration summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #c8d6cf;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.pinger-calibration summary span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 6px;
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.pinger-calibration[open] summary {
+  margin-bottom: 9px;
+  color: var(--accent);
 }
 
 .safety-note {
@@ -1782,8 +1994,12 @@ pre {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .field-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .pinger-parameter-groups {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pinger-parameter-group:last-child {
+    grid-column: 1 / -1;
   }
 
   #path-clear {
@@ -1834,7 +2050,8 @@ pre {
   .analysis-summary,
   .pinger-grid,
   .pinger-status,
-  .field-grid,
+  .pinger-parameter-groups,
+  .pinger-parameter-grid,
   .bag-status,
   .bag-topic-list,
   .ekf-diagonal,
@@ -1842,6 +2059,19 @@ pre {
   .telemetry dl {
     grid-template-columns: 1fr;
     width: 100%;
+  }
+
+  .pinger-parameter-group:last-child {
+    grid-column: auto;
+  }
+
+  .pinger-parameter-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pinger-parameter-actions {
+    justify-content: space-between;
   }
 
   .topic-list {

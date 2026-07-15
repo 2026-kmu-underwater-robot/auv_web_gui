@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AUV Localization Test</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260715-integrated" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260715-integrated-v3" />
   </head>
   <body>
     <main class="app">
@@ -585,21 +585,58 @@
               <span id="pinger-preflight-result">Preflight not run</span>
             </div>
 
-            <div class="field-grid">
-              <label><span>Audio device</span><input id="pinger-audio-device" type="text" placeholder="ALSA device (optional)" /></label>
-              <label><span>Reference frequency</span><input id="pinger-reference-frequency" type="number" value="21164" min="1000" max="100000" step="1" /></label>
-              <label><span>Tank max depth</span><input id="pinger-tank-depth" type="number" value="11.0" min="0.5" max="50" step="0.1" /></label>
-              <label><span>Control rate</span><input id="pinger-rate" type="number" value="30" min="1" max="120" step="1" /></label>
-              <label><span>Forward max</span><input id="pinger-forward-max" type="number" value="0.48" min="0.05" max="0.8" step="0.01" /></label>
-              <label><span>Yaw gain</span><input id="pinger-yaw-gain" type="number" value="0.85" min="0.1" max="2" step="0.01" /></label>
-              <label><span>Yaw command limit</span><input id="pinger-yaw-limit" type="number" value="0.42" min="0.05" max="0.7" step="0.01" /></label>
-              <label><span>Arrival radius</span><input id="pinger-arrival-radius" type="number" value="1.5" min="0.2" max="20" step="0.1" /></label>
-              <label><span>Arrival hold</span><input id="pinger-arrival-hold" type="number" value="1.0" min="0.1" max="10" step="0.1" /></label>
-              <label><span>Max runtime</span><input id="pinger-max-runtime" type="number" value="180" min="5" max="3600" step="5" /></label>
-              <label><span>Success hold</span><input id="pinger-success-hold" type="number" value="0.8" min="0.1" max="10" step="0.1" /></label>
-              <label><span>Success range</span><input id="pinger-success-range" type="number" value="0.0" min="0" max="20" step="0.1" /></label>
-              <label><span>IQ range constant</span><input id="pinger-range-constant" type="number" value="0.0" min="0" max="10" step="0.001" /></label>
-            </div>
+            <section class="pinger-parameters" aria-labelledby="pinger-parameters-heading">
+              <div class="pinger-parameter-header">
+                <div>
+                  <h3 id="pinger-parameters-heading">Homing parameters</h3>
+                  <p>값을 바꾸면 아래 요약과 검증 상태가 즉시 갱신됩니다. 변경값은 다음 시작부터 적용됩니다.</p>
+                </div>
+                <div class="pinger-parameter-actions">
+                  <span id="pinger-parameter-state" class="pinger-parameter-state" aria-live="polite">Defaults loaded</span>
+                  <button id="pinger-parameter-reset" type="button">Reset defaults</button>
+                </div>
+              </div>
+
+              <div id="pinger-parameter-summary" class="pinger-parameter-summary" aria-live="polite"></div>
+
+              <div class="pinger-parameter-groups">
+                <fieldset class="pinger-parameter-group">
+                  <legend>Signal &amp; environment</legend>
+                  <div class="pinger-parameter-grid">
+                    <label><span>Audio device</span><input id="pinger-audio-device" data-pinger-param type="text" placeholder="ALSA device (optional)" /><small>비우면 시스템 기본 입력</small></label>
+                    <label><span>Reference frequency</span><input id="pinger-reference-frequency" data-pinger-param type="number" value="21164" min="1000" max="100000" step="1" required /><small>Hz · 핑거 기준 주파수</small></label>
+                    <label><span>Tank max depth</span><input id="pinger-tank-depth" data-pinger-param type="number" value="11.0" min="0.5" max="50" step="0.1" required /><small>m · 수직 탐색 안전 경계</small></label>
+                    <label><span>Control rate</span><input id="pinger-rate" data-pinger-param type="number" value="30" min="1" max="120" step="1" required /><small>Hz · RC 명령 갱신 속도</small></label>
+                  </div>
+                </fieldset>
+
+                <fieldset class="pinger-parameter-group">
+                  <legend>Motion tuning</legend>
+                  <div class="pinger-parameter-grid pinger-motion-grid">
+                    <label><span>Forward max</span><input id="pinger-forward-max" data-pinger-param type="number" value="0.48" min="0.05" max="0.8" step="0.01" required /><small>0–1 · 최대 전진 명령</small></label>
+                    <label><span>Yaw gain</span><input id="pinger-yaw-gain" data-pinger-param type="number" value="0.85" min="0.1" max="2" step="0.01" required /><small>방위 오차 반응 강도</small></label>
+                    <label><span>Yaw command limit</span><input id="pinger-yaw-limit" data-pinger-param type="number" value="0.42" min="0.05" max="0.7" step="0.01" required /><small>0–1 · 최대 회전 명령</small></label>
+                  </div>
+                </fieldset>
+
+                <fieldset class="pinger-parameter-group">
+                  <legend>Arrival &amp; completion</legend>
+                  <div class="pinger-parameter-grid">
+                    <label><span>Arrival radius</span><input id="pinger-arrival-radius" data-pinger-param type="number" value="1.5" min="0.2" max="20" step="0.1" required /><small>m · 근접 완료 반경</small></label>
+                    <label><span>Arrival hold</span><input id="pinger-arrival-hold" data-pinger-param type="number" value="1.0" min="0.1" max="10" step="0.1" required /><small>s · 반경 내 유지 시간</small></label>
+                    <label><span>Max runtime</span><input id="pinger-max-runtime" data-pinger-param type="number" value="180" min="5" max="3600" step="5" required /><small>s · 자동 정지 시간</small></label>
+                  </div>
+                  <details class="pinger-calibration">
+                    <summary>Calibrated range stop <span>Advanced</span></summary>
+                    <div class="pinger-parameter-grid">
+                      <label><span>Success hold</span><input id="pinger-success-hold" data-pinger-param type="number" value="0.8" min="0.1" max="10" step="0.1" required /><small>s · 거리 조건 유지</small></label>
+                      <label><span>Success range</span><input id="pinger-success-range" data-pinger-param type="number" value="0.0" min="0" max="20" step="0.1" required /><small>m · 0이면 거리 완료 OFF</small></label>
+                      <label><span>IQ range constant</span><input id="pinger-range-constant" data-pinger-param type="number" value="0.0" min="0" max="10" step="0.001" required /><small>실측 보정 후에만 입력</small></label>
+                    </div>
+                  </details>
+                </fieldset>
+              </div>
+            </section>
             <p class="safety-note">IQ range constant 0은 실물에서 미보정 절대거리 판정을 끕니다. 실측 보정 전에는 0으로 두십시오. Live RC는 자동 아밍하지 않으며, MAVROS가 실제 armed일 때만 출력됩니다.</p>
           </article>
 
@@ -691,6 +728,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260715-integrated"></script>
+    <script src="/static/app.js?v=20260715-integrated-v3"></script>
   </body>
 </html>
