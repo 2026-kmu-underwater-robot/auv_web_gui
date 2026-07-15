@@ -173,6 +173,10 @@ class LocalizationRosNode(Node):
         self._pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
         self._velocity = {"x": 0.0, "y": 0.0, "z": 0.0}
         self._depth = {"z": 0.0}
+        self._frames = {
+            "odom": {"frame_id": "", "child_frame_id": ""},
+            "depth": {"frame_id": ""},
+        }
         self._attitude = {
             "roll_deg": None,
             "pitch_deg": None,
@@ -278,9 +282,6 @@ class LocalizationRosNode(Node):
         self._vision_enable_pub = self.create_publisher(
             Bool, "/mission/control_enable", 10
         )
-        self._vision_rc_release_pub = self.create_publisher(
-            OverrideRCIn, "/mavros/rc/override", 10
-        )
         self._arm_client = self.create_client(CommandBool, "/mavros/cmd/arming")
         self._set_mode_client = self.create_client(SetMode, "/mavros/set_mode")
         self._set_pose_client = self.create_client(SetPose, "/set_pose")
@@ -319,6 +320,8 @@ class LocalizationRosNode(Node):
             "/mission/rc_command",
             self._on_vision_rc_command,
             20,
+        )
+        self.create_subscription(
             String,
             self._topic_config.pinger_homing_status,
             self._on_pinger_homing,
@@ -362,13 +365,28 @@ class LocalizationRosNode(Node):
         )
 
     def snapshot(self) -> dict:
+        topic_names_and_types = dict(self.get_topic_names_and_types())
+        rc_output_publishers = self.get_publishers_info_by_topic(
+            self._topic_config.rc_output
+        )
+        audio_publishers = self.get_publishers_info_by_topic(self._topic_config.audio)
         graph = {
-            "rc_output_publishers": len(
-                self.get_publishers_info_by_topic(self._topic_config.rc_output)
-            ),
-            "audio_publishers": len(
-                self.get_publishers_info_by_topic(self._topic_config.audio)
-            ),
+            "rc_output_publishers": len(rc_output_publishers),
+            "rc_output_publisher_nodes": _endpoint_nodes(rc_output_publishers),
+            "audio_publishers": len(audio_publishers),
+            "audio_publisher_nodes": _endpoint_nodes(audio_publishers),
+            "topic_types": {
+                "odom": list(topic_names_and_types.get(self._topic_config.odom, [])),
+                "depth": list(topic_names_and_types.get(self._topic_config.depth, [])),
+                "mavros_state": list(
+                    topic_names_and_types.get(self._topic_config.mavros_state, [])
+                ),
+                "audio": list(topic_names_and_types.get(self._topic_config.audio, [])),
+            },
+            "services": {
+                "arming": self._arm_client.service_is_ready(),
+                "set_mode": self._set_mode_client.service_is_ready(),
+            },
         }
         with self._lock:
             return {
@@ -390,6 +408,10 @@ class LocalizationRosNode(Node):
                 "pose": dict(self._pose),
                 "velocity": dict(self._velocity),
                 "depth": dict(self._depth),
+                "frames": {
+                    "odom": dict(self._frames["odom"]),
+                    "depth": dict(self._frames["depth"]),
+                },
                 "attitude": dict(self._attitude),
                 "dvl_quality": dict(self._dvl_quality),
                 "precheck": self._precheck_snapshot_locked(),
@@ -430,11 +452,6 @@ class LocalizationRosNode(Node):
 
     def release_vision_control(self) -> None:
         self.set_vision_control_enabled(False)
-        msg = OverrideRCIn()
-        msg.channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
-        for channel in (3, 4, 5):
-            msg.channels[channel - 1] = OverrideRCIn.CHAN_RELEASE
-        self._vision_rc_release_pub.publish(msg)
 
     def clear_path(self) -> None:
         with self._lock:
@@ -660,6 +677,10 @@ class LocalizationRosNode(Node):
                 "z": pose.position.z,
                 "yaw": yaw,
             }
+            self._frames["odom"] = {
+                "frame_id": msg.header.frame_id,
+                "child_frame_id": msg.child_frame_id,
+            }
             self._append_path_point(pose.position.x, pose.position.y)
 
     def _append_path_point(self, x: float, y: float) -> None:
@@ -790,6 +811,7 @@ class LocalizationRosNode(Node):
         with self._lock:
             self._health["depth"].tick()
             self._depth = {"z": msg.pose.pose.position.z}
+            self._frames["depth"] = {"frame_id": msg.header.frame_id}
 
     def _on_battery(self, msg: BatteryState) -> None:
         with self._lock:
@@ -935,6 +957,7 @@ class LocalizationRosNode(Node):
             "mission_state": str(self._vision["mission_state"]),
             "rc_channels": list(self._vision["rc_channels"]),
         }
+
     def _on_pinger_homing(self, msg: String) -> None:
         parsed = _json_object(msg.data)
         with self._lock:
@@ -1083,7 +1106,6 @@ class LocalizationRosNode(Node):
             latest["ok"] = False
             latest["reason"] = latest.get("reason") or "no recent DVL data"
             return False, latest
-        window_start = now - duration_s
         has_full_window = (now - float(recent[0]["t"])) >= max(
             0.0, duration_s - DVL_TWIST_STALE_AFTER_S)
         latest_is_fresh = now - recent[-1]["t"] <= DVL_TWIST_STALE_AFTER_S
@@ -1193,6 +1215,7 @@ class RosInterface:
         self.node: LocalizationRosNode | None = None
         self._executor: SingleThreadedExecutor | None = None
         self._spin_thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
 
     def start(self) -> None:
         if not rclpy.ok():
@@ -1205,20 +1228,24 @@ class RosInterface:
         self._spin_thread.start()
 
     def _spin(self) -> None:
-        if self._executor is None:
+        executor = self._executor
+        if executor is None:
             return
         try:
-            self._executor.spin()
+            executor.spin()
         except ExternalShutdownException:
             pass
 
     def stop(self) -> None:
-        if self._executor is not None:
-            self._executor.shutdown()
+        with self._state_lock:
+            executor = self._executor
+            node = self.node
             self._executor = None
-        if self.node is not None:
-            self.node.destroy_node()
             self.node = None
+            if executor is not None:
+                executor.shutdown()
+            if node is not None:
+                node.destroy_node()
         if self._spin_thread is not None:
             self._spin_thread.join(timeout=1.0)
             self._spin_thread = None
@@ -1226,9 +1253,17 @@ class RosInterface:
             rclpy.shutdown()
 
     def status(self) -> dict:
-        if self.node is None:
-            return {}
-        return self.node.snapshot()
+        with self._state_lock:
+            if self.node is None or not rclpy.ok():
+                return {}
+            try:
+                return self.node.snapshot()
+            except Exception:
+                # SIGINT can invalidate the global ROS context before FastAPI's
+                # shutdown hook closes an already-connected status WebSocket.
+                if not rclpy.ok():
+                    return {}
+                raise
 
     def publish_dvl_command(
         self,
@@ -1378,3 +1413,14 @@ def _integer_or_zero(value: object) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _endpoint_nodes(endpoints: list) -> list[dict[str, str]]:
+    return [
+        {
+            "name": str(endpoint.node_name),
+            "namespace": str(endpoint.node_namespace),
+            "type": str(endpoint.topic_type),
+        }
+        for endpoint in endpoints
+    ]
