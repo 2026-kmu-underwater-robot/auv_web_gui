@@ -111,6 +111,130 @@ function pingerPayload(dryRun) {
   };
 }
 
+function pingerParameterInputs() {
+  return Array.from(document.querySelectorAll("[data-pinger-param]"));
+}
+
+function validatePingerParameters({ focusInvalid = true } = {}) {
+  const successRange = $("pinger-success-range");
+  const rangeConstant = $("pinger-range-constant");
+  const successRangeValue = Number(successRange.value);
+  const rangeConstantValue = Number(rangeConstant.value);
+
+  rangeConstant.setCustomValidity("");
+  if (successRangeValue > 0 && !(rangeConstantValue > 0)) {
+    rangeConstant.setCustomValidity(
+      "Success range를 사용하려면 실측한 IQ range constant를 0보다 크게 입력하십시오.",
+    );
+  }
+
+  const inputs = pingerParameterInputs();
+  inputs.forEach((input) => {
+    input.setAttribute("aria-invalid", String(!input.checkValidity()));
+  });
+  const invalid = inputs.find((input) => !input.checkValidity());
+  if (invalid && focusInvalid) {
+    const details = invalid.closest("details");
+    if (details) details.open = true;
+    invalid.focus();
+    invalid.reportValidity();
+  }
+  return !invalid;
+}
+
+function pingerParameterNumber(id) {
+  const text = $(id).value.trim();
+  if (!text) return null;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : null;
+}
+
+function renderPingerParameterSummary() {
+  const tankDepth = pingerParameterNumber("pinger-tank-depth");
+  const forwardMax = pingerParameterNumber("pinger-forward-max");
+  const yawLimit = pingerParameterNumber("pinger-yaw-limit");
+  const arrivalRadius = pingerParameterNumber("pinger-arrival-radius");
+  const arrivalHold = pingerParameterNumber("pinger-arrival-hold");
+  const maxRuntime = pingerParameterNumber("pinger-max-runtime");
+  const successRange = pingerParameterNumber("pinger-success-range");
+  const chip = (label, value, className = "") =>
+    `<span class="${className}">${escapeHtml(label)} <strong>${escapeHtml(value)}</strong></span>`;
+
+  $("pinger-parameter-summary").innerHTML = [
+    chip("Tank", tankDepth === null ? "--" : `${tankDepth.toFixed(1)} m`),
+    chip("Forward", forwardMax === null ? "--" : `${Math.round(forwardMax * 100)}%`),
+    chip("Yaw limit", yawLimit === null ? "--" : `${Math.round(yawLimit * 100)}%`),
+    chip(
+      "Arrival",
+      arrivalRadius === null || arrivalHold === null
+        ? "--"
+        : `${arrivalRadius.toFixed(1)} m / ${arrivalHold.toFixed(1)} s`,
+    ),
+    chip("Runtime", maxRuntime === null ? "--" : `${Math.round(maxRuntime)} s`),
+    successRange > 0
+      ? chip("Range stop", `${successRange.toFixed(1)} m`)
+      : chip("Range stop", "OFF", "off"),
+  ].join("");
+}
+
+function syncPingerParameterUi({ markPreflightStale = false } = {}) {
+  validatePingerParameters({ focusInvalid: false });
+  const inputs = pingerParameterInputs();
+  const changed = inputs.filter((input) => input.value !== input.defaultValue);
+  const invalid = inputs.filter((input) => !input.checkValidity());
+
+  inputs.forEach((input) => {
+    input.closest("label")?.classList.toggle("changed", input.value !== input.defaultValue);
+  });
+
+  const indicator = $("pinger-parameter-state");
+  indicator.classList.toggle("changed", invalid.length === 0 && changed.length > 0);
+  indicator.classList.toggle("invalid", invalid.length > 0);
+  if (invalid.length > 0) {
+    indicator.textContent = `${invalid.length} invalid value${invalid.length === 1 ? "" : "s"}`;
+  } else if (changed.length > 0) {
+    indicator.textContent = `${changed.length} change${changed.length === 1 ? "" : "s"} · next start`;
+  } else {
+    indicator.textContent = "Defaults loaded";
+  }
+
+  renderPingerParameterSummary();
+  if (markPreflightStale) {
+    const preflight = $("pinger-preflight-result");
+    preflight.textContent = "Parameters changed · run preflight again";
+    preflight.classList.remove("good");
+    preflight.classList.add("warn");
+  }
+}
+
+function resetPingerParameters() {
+  pingerParameterInputs().forEach((input) => {
+    input.value = input.defaultValue;
+  });
+  syncPingerParameterUi({ markPreflightStale: true });
+}
+
+function pingerRequest(path, dryRun, onSuccess = null) {
+  if (!validatePingerParameters()) {
+    syncPingerParameterUi({ markPreflightStale: true });
+    showError(new Error("Fix invalid Pinger parameters before continuing."));
+    return;
+  }
+  const request = postJson(path, pingerPayload(dryRun));
+  if (onSuccess) request.then(onSuccess).catch(showError);
+  else request.catch(showError);
+}
+
+function bindPingerParameterControls() {
+  pingerParameterInputs().forEach((input) => {
+    input.addEventListener("input", () => {
+      syncPingerParameterUi({ markPreflightStale: true });
+    });
+  });
+  $("pinger-parameter-reset").addEventListener("click", resetPingerParameters);
+  syncPingerParameterUi();
+}
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -171,6 +295,7 @@ async function getJson(path) {
 }
 
 function bindControls() {
+  bindPingerParameterControls();
   $("start-stack").addEventListener("click", () => {
     postJson("/api/stack/start").catch(showError);
   });
@@ -178,12 +303,10 @@ function bindControls() {
     postJson("/api/stack/stop").catch(showError);
   });
   $("start-pinger-dry").addEventListener("click", () => {
-    postJson("/api/pinger/start", pingerPayload(true)).catch(showError);
+    pingerRequest("/api/pinger/start", true);
   });
   $("pinger-preflight").addEventListener("click", () => {
-    postJson("/api/pinger/preflight", pingerPayload(false))
-      .then(renderPingerPreflight)
-      .catch(showError);
+    pingerRequest("/api/pinger/preflight", false, renderPingerPreflight);
   });
   $("pinger-set-mode").addEventListener("click", () => {
     postJson("/api/pinger/mode", { mode: $("pinger-mode").value }).catch(showError);
@@ -196,6 +319,11 @@ function bindControls() {
     postJson("/api/pinger/arm", { armed: false }).catch(showError);
   });
   $("start-pinger-live").addEventListener("click", () => {
+    if (!validatePingerParameters()) {
+      syncPingerParameterUi({ markPreflightStale: true });
+      showError(new Error("Fix invalid Pinger parameters before continuing."));
+      return;
+    }
     if (
       !window.confirm(
         "Enable real pinger-homing RC output? The controller will command MAVROS only while the vehicle reports ARMED.",
@@ -203,7 +331,7 @@ function bindControls() {
     ) {
       return;
     }
-    postJson("/api/pinger/start", pingerPayload(false)).catch(showError);
+    pingerRequest("/api/pinger/start", false);
   });
   $("stop-pinger").addEventListener("click", () => {
     postJson("/api/pinger/stop").catch(showError);

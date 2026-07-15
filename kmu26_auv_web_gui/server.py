@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import math
 import os
 import time
 from pathlib import Path
@@ -142,6 +143,13 @@ VISION_MISSION_LAUNCH_ARGS = {
     "area_verify_sec",
 }
 ALLOWED_PINGER_MODES = {"MANUAL", "STABILIZE", "ALT_HOLD", "POSHOLD", "GUIDED"}
+
+REAL_VEHICLE_TOPIC_TYPES = {
+    "odom": "nav_msgs/msg/Odometry",
+    "depth": "geometry_msgs/msg/PoseWithCovarianceStamped",
+    "mavros_state": "mavros_msgs/msg/State",
+    "audio": "audio_common_msgs/msg/AudioData",
+}
 
 
 def create_app(
@@ -691,12 +699,18 @@ def _pinger_live_preflight(ros_status: dict, body: dict) -> dict:
     topics = ros_status.get("topics", {}) if isinstance(ros_status, dict) else {}
     mavros = ros_status.get("mavros_state", {}) if isinstance(ros_status, dict) else {}
     graph = ros_status.get("graph", {}) if isinstance(ros_status, dict) else {}
+    frames = ros_status.get("frames", {}) if isinstance(ros_status, dict) else {}
+    pose = ros_status.get("pose", {}) if isinstance(ros_status, dict) else {}
+    depth = ros_status.get("depth", {}) if isinstance(ros_status, dict) else {}
+    topic_types = graph.get("topic_types", {}) if isinstance(graph, dict) else {}
+    services = graph.get("services", {}) if isinstance(graph, dict) else {}
     checks: list[dict] = []
 
     def add(name: str, ok: bool, detail: str) -> None:
         checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
     odom_alive = bool(topics.get("odom", {}).get("alive", False))
+    depth_alive = bool(topics.get("depth", {}).get("alive", False))
     state_alive = bool(topics.get("mavros_state", {}).get("alive", False))
     connected = bool(mavros.get("connected", False))
     armed = bool(mavros.get("armed", False))
@@ -707,10 +721,70 @@ def _pinger_live_preflight(ros_status: dict, body: dict) -> dict:
     use_estimator = bool(body.get("use_hydrophone_estimator", True))
 
     add("odometry", odom_alive, "odometry is fresh" if odom_alive else "/odometry/filtered is stale")
+    _add_topic_type_check(checks, topic_types, "odom")
+    odom_frame = _normalized_frame(frames.get("odom", {}).get("frame_id"))
+    odom_child_frame = _normalized_frame(
+        frames.get("odom", {}).get("child_frame_id")
+    )
+    add(
+        "odometry_frames",
+        odom_alive and odom_frame == "odom" and odom_child_frame == "base_link",
+        (
+            "odometry frames are odom -> base_link"
+            if odom_alive and odom_frame == "odom" and odom_child_frame == "base_link"
+            else f"expected odom -> base_link, got {odom_frame or '--'} -> {odom_child_frame or '--'}"
+        ),
+    )
+    add("depth", depth_alive, "depth pose is fresh" if depth_alive else "/depth/pose is stale")
+    _add_topic_type_check(checks, topic_types, "depth")
+    depth_frame = _normalized_frame(frames.get("depth", {}).get("frame_id"))
+    add(
+        "depth_frame",
+        depth_alive and depth_frame == "odom",
+        (
+            "depth frame is odom"
+            if depth_alive and depth_frame == "odom"
+            else f"expected depth frame odom, got {depth_frame or '--'}"
+        ),
+    )
+    odom_z = _finite_float(pose.get("z"))
+    depth_z = _finite_float(depth.get("z"))
+    depth_sign_ok = (
+        odom_alive
+        and depth_alive
+        and odom_z is not None
+        and depth_z is not None
+        and odom_z <= 0.10
+        and depth_z <= 0.10
+        and (
+            abs(odom_z) < 0.10
+            or abs(depth_z) < 0.10
+            or odom_z * depth_z >= 0.0
+        )
+    )
+    add(
+        "depth_sign",
+        depth_sign_ok,
+        (
+            f"z-up contract is consistent (odom z={odom_z:.2f}, depth z={depth_z:.2f})"
+            if depth_sign_ok
+            else "odometry and depth must both use z-up (underwater z is negative)"
+        ),
+    )
     add(
         "mavros",
         state_alive and connected,
         "MAVROS is connected" if state_alive and connected else "/mavros/state is stale or disconnected",
+    )
+    _add_topic_type_check(checks, topic_types, "mavros_state")
+    add(
+        "mavros_services",
+        bool(services.get("arming", False)) and bool(services.get("set_mode", False)),
+        (
+            "MAVROS arming and set-mode services are ready"
+            if services.get("arming", False) and services.get("set_mode", False)
+            else "MAVROS /mavros/cmd/arming or /mavros/set_mode service is unavailable"
+        ),
     )
     add("armed", armed, "vehicle is armed" if armed else "vehicle is not armed")
     add(
@@ -724,7 +798,26 @@ def _pinger_live_preflight(ros_status: dict, body: dict) -> dict:
         (
             "RC output has no existing publisher"
             if rc_publishers == 0
-            else f"/mavros/rc/override already has {rc_publishers} publisher(s)"
+            else (
+                f"/mavros/rc/override already has {rc_publishers} publisher(s): "
+                f"{_publisher_node_summary(graph.get('rc_output_publisher_nodes', []))}"
+            )
+        ),
+    )
+    audio_types = set(topic_types.get("audio", []))
+    expected_audio_type = REAL_VEHICLE_TOPIC_TYPES["audio"]
+    audio_type_ok = use_capture or expected_audio_type in audio_types
+    add(
+        "audio_type",
+        audio_type_ok,
+        (
+            "bundled audio capture will provide audio_common_msgs/msg/AudioData"
+            if use_capture
+            else (
+                "audio type is audio_common_msgs/msg/AudioData"
+                if audio_type_ok
+                else f"expected {expected_audio_type}, got {', '.join(sorted(audio_types)) or '--'}"
+            )
         ),
     )
     add(
@@ -764,6 +857,48 @@ def _pinger_live_preflight(ros_status: dict, body: dict) -> dict:
         f"arrival radius {arrival_radius_m:.2f} m" if arrival_radius_m >= 0.2 else "arrival_radius_m must be at least 0.2 m",
     )
     return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
+
+def _add_topic_type_check(checks: list[dict], topic_types: dict, key: str) -> None:
+    expected = REAL_VEHICLE_TOPIC_TYPES[key]
+    discovered = set(topic_types.get(key, []))
+    ok = expected in discovered
+    checks.append(
+        {
+            "name": f"{key}_type",
+            "ok": ok,
+            "detail": (
+                f"{key} type is {expected}"
+                if ok
+                else f"expected {expected}, got {', '.join(sorted(discovered)) or '--'}"
+            ),
+        }
+    )
+
+
+def _normalized_frame(value: object) -> str:
+    return str(value or "").strip().lstrip("/")
+
+
+def _finite_float(value: object) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _publisher_node_summary(nodes: object) -> str:
+    if not isinstance(nodes, list):
+        return "unknown"
+    labels = []
+    for item in nodes:
+        if not isinstance(item, dict):
+            continue
+        namespace = str(item.get("namespace", "/")).rstrip("/")
+        name = str(item.get("name", "unknown")).lstrip("/")
+        labels.append(f"{namespace}/{name}" if namespace else f"/{name}")
+    return ", ".join(labels) or "unknown"
 
 
 def _run_localization_test(
