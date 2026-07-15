@@ -22,6 +22,8 @@ def generate_launch_description() -> LaunchDescription:
     dronecan_allocator_node_id = LaunchConfiguration("dronecan_allocator_node_id")
     dronecan_allocator_db = LaunchConfiguration("dronecan_allocator_db")
     dronecan_python = LaunchConfiguration("dronecan_python")
+    pinger_package = LaunchConfiguration("pinger_package")
+    pinger_launch = LaunchConfiguration("pinger_launch")
 
     return LaunchDescription(
         [
@@ -34,6 +36,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("dronecan_allocator_node_id", default_value="126"),
             DeclareLaunchArgument("dronecan_allocator_db", default_value=""),
             DeclareLaunchArgument("dronecan_python", default_value=dronecan_python_default),
+            DeclareLaunchArgument("pinger_package", default_value="kmu26_pinger_homing"),
+            DeclareLaunchArgument("pinger_launch", default_value="pinger_homing_real.launch.py"),
             Node(
                 package="kmu26_auv_web_gui",
                 executable="server",
@@ -58,6 +62,10 @@ def generate_launch_description() -> LaunchDescription:
                     dronecan_allocator_db,
                     "--dronecan-python",
                     dronecan_python,
+                    "--pinger-package",
+                    pinger_package,
+                    "--pinger-launch",
+                    pinger_launch,
                 ],
             ),
         ]

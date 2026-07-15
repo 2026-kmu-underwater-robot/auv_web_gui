@@ -72,6 +72,33 @@ function fmtPercent(value, digits = 1) {
     : "--";
 }
 
+function inputNumber(id, fallback) {
+  const value = Number($(id).value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function pingerPayload(dryRun) {
+  return {
+    dry_run: dryRun,
+    confirm_live: !dryRun,
+    use_hydrophone_estimator: $("pinger-use-estimator").checked,
+    use_audio_capture: $("pinger-use-capture").checked,
+    audio_device: $("pinger-audio-device").value.trim(),
+    reference_frequency_hz: inputNumber("pinger-reference-frequency", 21164),
+    tank_max_depth_m: inputNumber("pinger-tank-depth", 11),
+    rate_hz: inputNumber("pinger-rate", 30),
+    forward_max: inputNumber("pinger-forward-max", 0.48),
+    yaw_gain: inputNumber("pinger-yaw-gain", 0.85),
+    yaw_command_limit: inputNumber("pinger-yaw-limit", 0.42),
+    arrival_radius_m: inputNumber("pinger-arrival-radius", 1.5),
+    arrival_hold_s: inputNumber("pinger-arrival-hold", 1.0),
+    max_runtime_s: inputNumber("pinger-max-runtime", 180),
+    success_hold_s: inputNumber("pinger-success-hold", 0.8),
+    success_range_m: inputNumber("pinger-success-range", 0),
+    amplitude_range_constant: inputNumber("pinger-range-constant", 0),
+  };
+}
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -137,6 +164,37 @@ function bindControls() {
   });
   $("stop-stack").addEventListener("click", () => {
     postJson("/api/stack/stop").catch(showError);
+  });
+  $("start-pinger-dry").addEventListener("click", () => {
+    postJson("/api/pinger/start", pingerPayload(true)).catch(showError);
+  });
+  $("pinger-preflight").addEventListener("click", () => {
+    postJson("/api/pinger/preflight", pingerPayload(false))
+      .then(renderPingerPreflight)
+      .catch(showError);
+  });
+  $("pinger-set-mode").addEventListener("click", () => {
+    postJson("/api/pinger/mode", { mode: $("pinger-mode").value }).catch(showError);
+  });
+  $("pinger-arm").addEventListener("click", () => {
+    if (!window.confirm("ARM the physical vehicle? Keep the area and propellers clear.")) return;
+    postJson("/api/pinger/arm", { armed: true }).catch(showError);
+  });
+  $("pinger-disarm").addEventListener("click", () => {
+    postJson("/api/pinger/arm", { armed: false }).catch(showError);
+  });
+  $("start-pinger-live").addEventListener("click", () => {
+    if (
+      !window.confirm(
+        "Enable real pinger-homing RC output? The controller will command MAVROS only while the vehicle reports ARMED.",
+      )
+    ) {
+      return;
+    }
+    postJson("/api/pinger/start", pingerPayload(false)).catch(showError);
+  });
+  $("stop-pinger").addEventListener("click", () => {
+    postJson("/api/pinger/stop").catch(showError);
   });
   $("start-bag").addEventListener("click", () => {
     startBag().catch(showError);
@@ -247,6 +305,13 @@ function renderStatus(payload) {
   const dvlEvents = ros.dvl_events || [];
 
   setPill("stack-pill", process.stack_running, process.stack_running ? "STACK ON" : "STACK OFF");
+  const pingerAlive = Boolean(process.pinger_running && topics.pinger_homing?.alive);
+  const pingerMode = ros.pinger_homing_status?.dry_run ? "DRY" : "LIVE";
+  setPill(
+    "pinger-pill",
+    pingerAlive,
+    process.pinger_running ? `PINGER ${pingerAlive ? pingerMode : "WAIT"}` : "PINGER OFF",
+  );
   renderMavrosPill(mavrosState, topics.mavros_state);
   setPill("bag-pill", process.bag_running, process.bag_running ? "BAG ON" : "BAG OFF");
   setPill("joy-pill", topics.joy?.alive, topics.joy?.alive ? "JOY ON" : "JOY OFF");
@@ -272,6 +337,7 @@ function renderStatus(payload) {
   renderTestState();
   renderBag(process);
   renderTopics(topics);
+  renderPinger(process, ros);
   renderWebControlStatus(webControl);
   state.path.points = ros.path || [];
   state.path.pose = {
@@ -566,6 +632,91 @@ function triggerAmount(axes, index) {
   // DualShock triggers commonly report 1.0 at rest and -1.0 when fully pressed.
   if (value < -0.05) return (1 - value) / 2;
   return 0;
+}
+
+function formatCommand(command) {
+  if (!command || typeof command !== "object") return "--";
+  return `F ${fmt(command.forward)} | L ${fmt(command.lateral)} | H ${fmt(command.heave)} | Y ${fmt(command.yaw)}`;
+}
+
+function renderPingerPreflight(result) {
+  const failed = (result.checks || []).filter((check) => !check.ok);
+  $("pinger-preflight-result").textContent = result.ok
+    ? "READY"
+    : failed.map((check) => check.detail).join(" | ") || "NOT READY";
+  $("pinger-preflight-result").classList.toggle("good", Boolean(result.ok));
+  $("pinger-preflight-result").classList.toggle("warn", !result.ok);
+}
+
+function renderPinger(process, ros) {
+  const pinger = ros.pinger_homing_status || {};
+  const topics = ros.topics || {};
+  const mux = ros.rc_mux_status || {};
+  const graph = ros.graph || {};
+  const depthSafety = pinger.depth_safety || {};
+  const estimate = Array.isArray(pinger.estimated_source_world)
+    ? pinger.estimated_source_world.map((value) => fmt(Number(value))).join(", ")
+    : "--";
+  const actualRange = pinger.amplitude_distance_m ?? pinger.estimated_distance_m;
+
+  $("pinger-process-state").textContent = process.pinger_running ? "running" : "stopped";
+  $("pinger-control-mode").textContent = !process.pinger_running
+    ? "STOPPED"
+    : pinger.dry_run
+      ? "DRY RUN · RC RELEASE"
+      : pinger.control_output_active
+        ? "LIVE · RC ACTIVE"
+        : "LIVE · waiting for ARMED";
+  $("pinger-mux-state").textContent = topics.rc_mux?.alive
+    ? `${mux.owner || "unknown"} | ${
+        mux.conflict ? "CONFLICT" : mux.output_enabled ? "output enabled" : "output blocked"
+      } | pubs ${mux.publisher_count ?? 0}`
+    : `stale | /mavros/rc/override pubs ${graph.rc_output_publishers ?? 0}`;
+  $("pinger-controller-state").textContent = pinger.state || "--";
+  $("pinger-input-state").textContent = [
+    `odom ${topics.odom?.alive ? "OK" : "stale"}`,
+    `mavros ${topics.mavros_state?.alive && pinger.connected ? "OK" : "stale"}`,
+    `audio ${pinger.audio_fresh ? "OK" : "stale"}`,
+    `direction ${topics.hydrophone_direction?.alive ? "OK" : "stale"}`,
+  ].join(" | ");
+  $("pinger-estimate").textContent = `xyz ${estimate} | range ${fmtUnit(actualRange, "m")} | bearing ${fmtUnit(
+    pinger.bearing_error_deg,
+    "deg",
+    1,
+  )}`;
+  $("pinger-quality").textContent = `locked ${pinger.source_locked ? "yes" : "no"} | residual ${fmtUnit(
+    pinger.rms_residual_m,
+    "m",
+    3,
+  )} | cond ${fmt(pinger.condition_number, 1)} | bias ${fmtUnit(pinger.bias_range_rate_mps, "m/s", 3)}`;
+  $("pinger-requested-command").textContent = formatCommand(pinger.requested_command);
+  $("pinger-command").textContent = formatCommand(pinger.command);
+  $("pinger-depth-safety").textContent = `depth ${fmtUnit(depthSafety.vehicle_depth_m, "m")} / ${fmtUnit(
+    depthSafety.max_vehicle_depth_m,
+    "m",
+  )} | probe ${fmt(depthSafety.probe_heave)} | limit ${depthSafety.limit_active ? "ON" : "off"} | recovery ${
+    depthSafety.recovery_active ? "ON" : "off"
+  }`;
+  $("pinger-direction-source").textContent = pinger.control_direction_source || "--";
+  $("pinger-samples").textContent = `${pinger.sample_count ?? 0} samples | probe ${pinger.probe_attempt ?? 0} / ${
+    pinger.minimum_probe_legs ?? 0
+  }`;
+  $("pinger-result").textContent = `arrival ${pinger.arrival_complete ? "complete" : "pending"} | calibrated range ${
+    pinger.range_complete ? "complete" : "pending"
+  } | ${pinger.completion_reason || "running"} | runtime ${fmtUnit(pinger.active_runtime_s, "s", 1)} / ${fmtUnit(
+    pinger.max_runtime_s,
+    "s",
+    0,
+  )} | IQ K ${fmt(pinger.amplitude_range_constant, 3)}`;
+  $("pinger-log-output").textContent = (process.logs || [])
+    .filter(
+      (line) =>
+        line.includes("[pinger_homing]") ||
+        line.includes("single_hydrophone_homing") ||
+        line.includes("pinger_hydrophone") ||
+        line.includes("rc_override_mux"),
+    )
+    .join("\n");
 }
 
 function renderBag(process) {
