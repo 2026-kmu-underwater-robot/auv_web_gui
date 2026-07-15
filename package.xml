@@ -3,7 +3,7 @@
 <package format="3">
   <name>kmu26_auv_web_gui</name>
   <version>0.0.0</version>
-  <description>Web control panel for AUV localization tests.</description>
+  <description>Web control panel for AUV localization tests and pinger homing.</description>
   <maintainer email="kuuve@todo.todo">kuuve</maintainer>
   <license>TODO: License declaration</license>
 

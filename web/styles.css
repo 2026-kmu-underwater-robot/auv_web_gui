@@ -1623,6 +1623,118 @@ pre {
   margin-top: 14px;
   border-top: 1px solid var(--border);
   padding-top: 12px;
+.pinger-grid {
+  grid-template-columns: 1.2fr 0.8fr;
+}
+
+.pinger-control-panel,
+.pinger-log-panel {
+  grid-column: 1 / -1;
+}
+
+.panel-note {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.pinger-option-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 12px;
+  background: #141b18;
+  font-weight: 700;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.field-grid label {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  background: #141b18;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.field-grid input,
+.pinger-option-row select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 8px;
+  background: #0e1311;
+  color: var(--text);
+  font: inherit;
+}
+
+.safety-note {
+  margin-top: 12px;
+  border-left: 3px solid var(--warn);
+  padding: 9px 11px;
+  background: color-mix(in srgb, var(--warn), transparent 92%);
+  color: #f2d79f;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pinger-status {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.pinger-status div {
+  min-height: 62px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  background: #141b18;
+}
+
+.pinger-status dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pinger-status dd {
+  margin: 6px 0 0;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+#pinger-preflight-result.good {
+  color: var(--good);
+}
+
+#pinger-preflight-result.warn {
+  color: var(--warn);
+}
+
+#pinger-log-output {
+  min-height: 160px;
+  max-height: 420px;
 }
 
 @media (max-width: 980px) {
@@ -1661,11 +1773,17 @@ pre {
   .dvl-config,
   .control-layout,
   .analysis-summary,
+  .pinger-grid,
+  .pinger-status,
   .bag-status,
   .bag-topic-list,
   .ekf-diagonal,
   .path-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .field-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   #path-clear {
@@ -1714,6 +1832,9 @@ pre {
   .control-sliders,
   .control-command-grid,
   .analysis-summary,
+  .pinger-grid,
+  .pinger-status,
+  .field-grid,
   .bag-status,
   .bag-topic-list,
   .ekf-diagonal,

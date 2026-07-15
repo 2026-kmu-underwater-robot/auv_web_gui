@@ -16,6 +16,7 @@
         <div class="status-pills">
           <span id="stack-pill" class="pill">STACK</span>
           <span id="mavros-pill" class="pill">MAV</span>
+          <span id="pinger-pill" class="pill">PINGER</span>
           <span id="bag-pill" class="pill">BAG</span>
           <span id="joy-pill" class="pill">JOY</span>
           <span id="battery-pill" class="pill">BAT</span>
@@ -32,6 +33,7 @@
         <button id="state-tab-button" class="tab-button" data-tab="state" role="tab">State</button>
         <button id="control-tab-button" class="tab-button" data-tab="control" role="tab">Control</button>
         <button id="vision-tab-button" class="tab-button" data-tab="vision" role="tab">Vision Control</button>
+        <button id="pinger-tab-button" class="tab-button" data-tab="pinger" role="tab">Pinger Homing</button>
         <button id="bag-tab-button" class="tab-button" data-tab="bag" role="tab">Rosbag</button>
         <button id="ekf-tab-button" class="tab-button" data-tab="ekf" role="tab">EKF Params</button>
       </section>
@@ -538,6 +540,91 @@
             <pre id="vision-log-output" class="vision-log-output"></pre>
           </article>
         </div>
+      <section id="pinger-tab" class="tab-view">
+        <section class="grid pinger-grid">
+          <article class="panel pinger-control-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Real-vehicle Pinger Homing</h2>
+                <p class="panel-note">Dry Run은 추정과 제어 계산만 수행하고 MAVROS RC 채널을 모두 release합니다.</p>
+              </div>
+              <div class="panel-actions">
+                <button id="pinger-preflight">Preflight</button>
+                <button id="start-pinger-dry" class="primary">Start Dry Run</button>
+                <button id="start-pinger-live" class="danger">Start Live RC</button>
+                <button id="stop-pinger">Stop</button>
+              </div>
+            </div>
+
+            <div class="pinger-option-row">
+              <label class="check-field">
+                <input id="pinger-use-estimator" type="checkbox" checked />
+                <span>Run hydrophone estimator</span>
+              </label>
+              <label class="check-field">
+                <input id="pinger-use-capture" type="checkbox" />
+                <span>Start audio capture</span>
+              </label>
+            </div>
+
+            <div class="pinger-option-row">
+              <label><span>Vehicle mode</span>
+                <select id="pinger-mode">
+                  <option value="MANUAL">MANUAL</option>
+                  <option value="STABILIZE">STABILIZE</option>
+                  <option value="ALT_HOLD">ALT_HOLD</option>
+                  <option value="POSHOLD">POSHOLD</option>
+                  <option value="GUIDED">GUIDED</option>
+                </select>
+              </label>
+              <button id="pinger-set-mode">Set Mode</button>
+              <button id="pinger-arm" class="danger">ARM</button>
+              <button id="pinger-disarm">DISARM</button>
+              <span id="pinger-preflight-result">Preflight not run</span>
+            </div>
+
+            <div class="field-grid">
+              <label><span>Audio device</span><input id="pinger-audio-device" type="text" placeholder="ALSA device (optional)" /></label>
+              <label><span>Reference frequency</span><input id="pinger-reference-frequency" type="number" value="21164" min="1000" max="100000" step="1" /></label>
+              <label><span>Tank max depth</span><input id="pinger-tank-depth" type="number" value="11.0" min="0.5" max="50" step="0.1" /></label>
+              <label><span>Control rate</span><input id="pinger-rate" type="number" value="30" min="1" max="120" step="1" /></label>
+              <label><span>Forward max</span><input id="pinger-forward-max" type="number" value="0.48" min="0.05" max="0.8" step="0.01" /></label>
+              <label><span>Yaw gain</span><input id="pinger-yaw-gain" type="number" value="0.85" min="0.1" max="2" step="0.01" /></label>
+              <label><span>Yaw command limit</span><input id="pinger-yaw-limit" type="number" value="0.42" min="0.05" max="0.7" step="0.01" /></label>
+              <label><span>Arrival radius</span><input id="pinger-arrival-radius" type="number" value="1.5" min="0.2" max="20" step="0.1" /></label>
+              <label><span>Arrival hold</span><input id="pinger-arrival-hold" type="number" value="1.0" min="0.1" max="10" step="0.1" /></label>
+              <label><span>Max runtime</span><input id="pinger-max-runtime" type="number" value="180" min="5" max="3600" step="5" /></label>
+              <label><span>Success hold</span><input id="pinger-success-hold" type="number" value="0.8" min="0.1" max="10" step="0.1" /></label>
+              <label><span>Success range</span><input id="pinger-success-range" type="number" value="0.0" min="0" max="20" step="0.1" /></label>
+              <label><span>IQ range constant</span><input id="pinger-range-constant" type="number" value="0.0" min="0" max="10" step="0.001" /></label>
+            </div>
+            <p class="safety-note">IQ range constant 0은 실물에서 미보정 절대거리 판정을 끕니다. 실측 보정 전에는 0으로 두십시오. Live RC는 자동 아밍하지 않으며, MAVROS가 실제 armed일 때만 출력됩니다.</p>
+          </article>
+
+          <article class="panel pinger-status-panel">
+            <h2>Pinger Status</h2>
+            <dl class="pinger-status">
+              <div><dt>Process</dt><dd id="pinger-process-state">--</dd></div>
+              <div><dt>Output</dt><dd id="pinger-control-mode">--</dd></div>
+              <div><dt>RC Mux</dt><dd id="pinger-mux-state">--</dd></div>
+              <div><dt>Controller State</dt><dd id="pinger-controller-state">--</dd></div>
+              <div><dt>Inputs</dt><dd id="pinger-input-state">--</dd></div>
+              <div><dt>Estimate</dt><dd id="pinger-estimate">--</dd></div>
+              <div><dt>Quality</dt><dd id="pinger-quality">--</dd></div>
+              <div><dt>Requested RC</dt><dd id="pinger-requested-command">--</dd></div>
+              <div><dt>Applied RC</dt><dd id="pinger-command">--</dd></div>
+              <div><dt>Depth Safety</dt><dd id="pinger-depth-safety">--</dd></div>
+              <div><dt>Direction Source</dt><dd id="pinger-direction-source">--</dd></div>
+              <div><dt>Samples</dt><dd id="pinger-samples">--</dd></div>
+              <div><dt>Result</dt><dd id="pinger-result">--</dd></div>
+            </dl>
+          </article>
+
+          <article class="panel pinger-log-panel">
+            <h2>Pinger Homing Logs</h2>
+            <pre id="pinger-log-output"></pre>
+          </article>
+        </section>
       </section>
 
       <section id="bag-tab" class="tab-view">
@@ -603,5 +690,6 @@
     </main>
 
     <script src="/static/app.js?v=20260715-mission-pwm"></script>
+    <script src="/static/app.js?v=20260715-pinger-homing"></script>
   </body>
 </html>

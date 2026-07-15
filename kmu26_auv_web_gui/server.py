@@ -23,6 +23,7 @@ from kmu26_auv_web_gui.process_manager import ProcessManager
 from kmu26_auv_web_gui.ros_interface import ATTITUDE_MAX_TILT_DEG
 from kmu26_auv_web_gui.ros_interface import READY_MODES
 from kmu26_auv_web_gui.ros_interface import STILLNESS_MAX_SPEED_MPS
+from kmu26_auv_web_gui.ros_interface import TopicConfig
 from kmu26_auv_web_gui.ros_interface import RosInterface
 
 
@@ -40,6 +41,14 @@ DEFAULT_BAG_TOPICS = [
     "/mavros/imu/data",
     "/mavros/state",
     "/odometry/filtered",
+    "/audio",
+    "/audio_phase_estimator/delta_range_m",
+    "/audio_phase_estimator/iq_magnitude",
+    "/pinger_homing/status",
+    "/homing/direction",
+    "/pinger_homing/direction_body",
+    "/control/pinger/rc_override",
+    "/control/rc_override_mux/status",
     "/localization/path",
     "/tf",
     "/tf_static",
@@ -132,6 +141,7 @@ VISION_MISSION_LAUNCH_ARGS = {
     "search_timeout_sec",
     "area_verify_sec",
 }
+ALLOWED_PINGER_MODES = {"MANUAL", "STABILIZE", "ALT_HOLD", "POSHOLD", "GUIDED"}
 
 
 def create_app(
@@ -142,6 +152,9 @@ def create_app(
     dronecan_allocator_node_id: int = 126,
     dronecan_allocator_db: str = "",
     dronecan_python: str = "",
+    pinger_package: str = "kmu26_pinger_homing",
+    pinger_launch: str = "pinger_homing_real.launch.py",
+    topic_config: TopicConfig | None = None,
 ) -> FastAPI:
     app = FastAPI(title="AUV Localization Test GUI")
     process_manager = ProcessManager(
@@ -152,8 +165,10 @@ def create_app(
         dronecan_allocator_node_id=dronecan_allocator_node_id,
         dronecan_allocator_db=dronecan_allocator_db,
         dronecan_python=dronecan_python,
+        pinger_package=pinger_package,
+        pinger_launch=pinger_launch,
     )
-    ros_interface = RosInterface()
+    ros_interface = RosInterface(topic_config=topic_config)
     bag_selection: dict[str, object] = {
         "record_all": False,
         "topics": list(DEFAULT_BAG_TOPICS),
@@ -192,13 +207,150 @@ def create_app(
     @app.post("/api/stack/start")
     async def start_stack(request: Request) -> dict:
         body = await _json_or_empty(request)
-        process_manager.start_stack(body.get("launch_args", {}))
+        requested_launch_args = body.get("launch_args", {})
+        if not isinstance(requested_launch_args, dict):
+            raise HTTPException(status_code=400, detail="launch_args must be an object")
+        launch_args = {
+            "joy_rc_output_topic": "/control/joystick/rc_override",
+            "joy_release_when_idle": "true",
+        }
+        launch_args.update({str(key): str(value) for key, value in requested_launch_args.items()})
+        try:
+            process_manager.start_stack(launch_args)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _status(process_manager, ros_interface)
 
     @app.post("/api/stack/stop")
     def stop_stack() -> dict:
         process_manager.stop_stack()
         return _status(process_manager, ros_interface)
+
+    @app.post("/api/pinger/start")
+    async def start_pinger(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        dry_run = bool(body.get("dry_run", True))
+        if not dry_run and not bool(body.get("confirm_live", False)):
+            raise HTTPException(
+                status_code=400,
+                detail="live pinger homing requires confirm_live=true",
+            )
+        if not dry_run:
+            preflight = _pinger_live_preflight(ros_interface.status(), body)
+            if not preflight["ok"]:
+                failed = "; ".join(
+                    check["detail"] for check in preflight["checks"] if not check["ok"]
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"pinger live preflight failed: {failed}",
+                )
+
+        amplitude_constant = _bounded_float(
+            body, "amplitude_range_constant", 0.0, 0.0, 10.0
+        )
+        success_range = _bounded_float(body, "success_range_m", 0.0, 0.0, 20.0)
+        if success_range > 0.0 and amplitude_constant <= 0.0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "success_range_m requires a calibrated positive "
+                    "amplitude_range_constant"
+                ),
+            )
+
+        topics = ros_interface.topic_config
+        launch_args = {
+            "dry_run": "true" if dry_run else "false",
+            "use_audio_capture": "true" if bool(body.get("use_audio_capture", False)) else "false",
+            "use_hydrophone_estimator": (
+                "true" if bool(body.get("use_hydrophone_estimator", True)) else "false"
+            ),
+            "use_rc_mux": "true",
+            "audio_device": str(body.get("audio_device", "")).strip(),
+            "audio_topic": str(body.get("audio_topic", topics.audio)).strip() or topics.audio,
+            "reference_frequency_hz": str(
+                _bounded_float(body, "reference_frequency_hz", 21164.0, 1000.0, 100000.0)
+            ),
+            "odometry_topic": str(body.get("odometry_topic", topics.odom)).strip(),
+            "depth_topic": str(body.get("depth_topic", topics.depth)).strip(),
+            "state_topic": str(body.get("state_topic", topics.mavros_state)).strip(),
+            "direction_topic": str(
+                body.get("direction_topic", topics.hydrophone_direction)
+            ).strip(),
+            "status_topic": topics.pinger_homing_status,
+            "rate_hz": str(_bounded_float(body, "rate_hz", 30.0, 1.0, 120.0)),
+            "forward_max": str(_bounded_float(body, "forward_max", 0.48, 0.05, 0.8)),
+            "yaw_gain": str(_bounded_float(body, "yaw_gain", 0.85, 0.1, 2.0)),
+            "yaw_command_limit": str(
+                _bounded_float(body, "yaw_command_limit", 0.42, 0.05, 0.7)
+            ),
+            "tank_max_depth_m": str(
+                _bounded_float(body, "tank_max_depth_m", 11.0, 0.5, 50.0)
+            ),
+            "success_range_m": str(success_range),
+            "success_hold_s": str(
+                _bounded_float(body, "success_hold_s", 0.8, 0.1, 10.0)
+            ),
+            "arrival_radius_m": str(
+                _bounded_float(body, "arrival_radius_m", 1.5, 0.2, 20.0)
+            ),
+            "arrival_hold_s": str(
+                _bounded_float(body, "arrival_hold_s", 1.0, 0.1, 10.0)
+            ),
+            "max_runtime_s": str(
+                _bounded_float(body, "max_runtime_s", 180.0, 5.0, 3600.0)
+            ),
+            "amplitude_range_constant": str(amplitude_constant),
+        }
+        try:
+            process_manager.start_pinger(launch_args)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/pinger/stop")
+    def stop_pinger() -> dict:
+        process_manager.stop_pinger()
+        return _status(process_manager, ros_interface)
+
+    @app.post("/api/pinger/preflight")
+    async def pinger_preflight(request: Request) -> dict:
+        return _pinger_live_preflight(ros_interface.status(), await _json_or_empty(request))
+
+    @app.post("/api/pinger/arm")
+    async def pinger_arm(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        armed = bool(body.get("armed", False))
+        if armed and process_manager.status().get("pinger_running", False):
+            raise HTTPException(
+                status_code=400,
+                detail="stop pinger homing before changing arm state",
+            )
+        accepted = ros_interface.set_armed(armed)
+        if not accepted:
+            raise HTTPException(status_code=503, detail="MAVROS arming service unavailable")
+        payload = _status(process_manager, ros_interface)
+        payload["accepted"] = True
+        return payload
+
+    @app.post("/api/pinger/mode")
+    async def pinger_mode(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        mode = str(body.get("mode", "")).upper()
+        if mode not in ALLOWED_PINGER_MODES:
+            raise HTTPException(status_code=400, detail=f"unsupported mode: {mode}")
+        if process_manager.status().get("pinger_running", False):
+            raise HTTPException(
+                status_code=400,
+                detail="stop pinger homing before changing vehicle mode",
+            )
+        accepted = ros_interface.set_mode(mode)
+        if not accepted:
+            raise HTTPException(status_code=503, detail="MAVROS set-mode service unavailable")
+        payload = _status(process_manager, ros_interface)
+        payload["accepted"] = True
+        return payload
 
     @app.post("/api/dvl/command")
     async def run_dvl_command(request: Request) -> dict:
@@ -520,6 +672,100 @@ def _status(process_manager: ProcessManager, ros_interface: RosInterface) -> dic
     }
 
 
+def _bounded_float(
+    body: dict, key: str, default: float, minimum: float, maximum: float
+) -> float:
+    try:
+        value = float(body.get(key, default))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{key} must be numeric") from exc
+    if not minimum <= value <= maximum:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key} must be between {minimum} and {maximum}",
+        )
+    return value
+
+
+def _pinger_live_preflight(ros_status: dict, body: dict) -> dict:
+    topics = ros_status.get("topics", {}) if isinstance(ros_status, dict) else {}
+    mavros = ros_status.get("mavros_state", {}) if isinstance(ros_status, dict) else {}
+    graph = ros_status.get("graph", {}) if isinstance(ros_status, dict) else {}
+    checks: list[dict] = []
+
+    def add(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    odom_alive = bool(topics.get("odom", {}).get("alive", False))
+    state_alive = bool(topics.get("mavros_state", {}).get("alive", False))
+    connected = bool(mavros.get("connected", False))
+    armed = bool(mavros.get("armed", False))
+    mode = str(mavros.get("mode", "")).upper()
+    rc_publishers = int(graph.get("rc_output_publishers", 0) or 0)
+    audio_publishers = int(graph.get("audio_publishers", 0) or 0)
+    use_capture = bool(body.get("use_audio_capture", False))
+    use_estimator = bool(body.get("use_hydrophone_estimator", True))
+
+    add("odometry", odom_alive, "odometry is fresh" if odom_alive else "/odometry/filtered is stale")
+    add(
+        "mavros",
+        state_alive and connected,
+        "MAVROS is connected" if state_alive and connected else "/mavros/state is stale or disconnected",
+    )
+    add("armed", armed, "vehicle is armed" if armed else "vehicle is not armed")
+    add(
+        "mode",
+        mode in ALLOWED_PINGER_MODES,
+        f"vehicle mode is {mode}" if mode else "vehicle mode is unavailable",
+    )
+    add(
+        "rc_owner",
+        rc_publishers == 0,
+        (
+            "RC output has no existing publisher"
+            if rc_publishers == 0
+            else f"/mavros/rc/override already has {rc_publishers} publisher(s)"
+        ),
+    )
+    add(
+        "estimator",
+        use_estimator,
+        "hydrophone estimator enabled" if use_estimator else "hydrophone estimator is disabled",
+    )
+    add(
+        "audio",
+        use_capture or audio_publishers > 0,
+        (
+            "audio capture will start"
+            if use_capture
+            else (
+                f"audio source publishers: {audio_publishers}"
+                if audio_publishers > 0
+                else "/audio has no publisher; enable capture or start the hydrophone input"
+            )
+        ),
+    )
+    try:
+        max_runtime_s = float(body.get("max_runtime_s", 180.0))
+    except (TypeError, ValueError):
+        max_runtime_s = 0.0
+    try:
+        arrival_radius_m = float(body.get("arrival_radius_m", 1.5))
+    except (TypeError, ValueError):
+        arrival_radius_m = 0.0
+    add(
+        "runtime_limit",
+        max_runtime_s >= 5.0,
+        f"runtime limit {max_runtime_s:.1f} s" if max_runtime_s >= 5.0 else "max_runtime_s must be at least 5 s",
+    )
+    add(
+        "arrival_stop",
+        arrival_radius_m >= 0.2,
+        f"arrival radius {arrival_radius_m:.2f} m" if arrival_radius_m >= 0.2 else "arrival_radius_m must be at least 0.2 m",
+    )
+    return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
+
 def _run_localization_test(
     process_manager: ProcessManager,
     ros_interface: RosInterface,
@@ -804,7 +1050,36 @@ def main() -> None:
     parser.add_argument("--dronecan-allocator-node-id", default=126, type=int)
     parser.add_argument("--dronecan-allocator-db", default="")
     parser.add_argument("--dronecan-python", default="")
+    parser.add_argument("--pinger-package", default="kmu26_pinger_homing")
+    parser.add_argument("--pinger-launch", default="pinger_homing_real.launch.py")
+    parser.add_argument(
+        "--odom-topic",
+        default=os.environ.get("KMU26_ODOM_TOPIC", "/odometry/filtered"),
+    )
+    parser.add_argument(
+        "--depth-topic", default=os.environ.get("KMU26_DEPTH_TOPIC", "/depth/pose")
+    )
+    parser.add_argument(
+        "--mavros-state-topic",
+        default=os.environ.get("KMU26_MAVROS_STATE_TOPIC", "/mavros/state"),
+    )
+    parser.add_argument(
+        "--pinger-homing-status-topic",
+        default=os.environ.get("KMU26_PINGER_HOMING_STATUS_TOPIC", "/pinger_homing/status"),
+    )
+    parser.add_argument(
+        "--hydrophone-direction-topic",
+        default=os.environ.get("KMU26_HYDROPHONE_DIRECTION_TOPIC", "/homing/direction"),
+    )
     args, _ = parser.parse_known_args()
+
+    topic_config = TopicConfig(
+        odom=args.odom_topic,
+        depth=args.depth_topic,
+        mavros_state=args.mavros_state_topic,
+        pinger_homing_status=args.pinger_homing_status_topic,
+        hydrophone_direction=args.hydrophone_direction_topic,
+    )
 
     app = create_app(
         robot_package=args.robot_package,
@@ -814,6 +1089,9 @@ def main() -> None:
         dronecan_allocator_node_id=args.dronecan_allocator_node_id,
         dronecan_allocator_db=args.dronecan_allocator_db,
         dronecan_python=args.dronecan_python,
+        pinger_package=args.pinger_package,
+        pinger_launch=args.pinger_launch,
+        topic_config=topic_config,
     )
     uvicorn.run(app, host=args.host, port=args.port)
 
