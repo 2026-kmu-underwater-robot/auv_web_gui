@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AUV Localization Test</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260715-integrated-v3" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260717-detections-under-rc" />
   </head>
   <body>
     <main class="app">
@@ -185,13 +185,23 @@
               <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="false">Dark Off</button>
               <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="auto">Range Auto</button>
               <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="=1">Range 1</button>
-              <button data-dvl-command="calibrate_gyro">Calibrate Gyro</button>
+              <button id="dvl-calibrate">Calibrate Gyro</button>
               <button data-dvl-command="reset_dead_reckoning" class="danger">Reset DR</button>
             </div>
             <dl class="dvl-config">
               <div>
                 <dt>Test</dt>
                 <dd id="test-state">Idle</dd>
+              </div>
+              <div>
+                <dt>Gyro Calibration</dt>
+                <dd
+                  id="dvl-calibration-state"
+                  class="dvl-calibration-status idle"
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >Ready</dd>
               </div>
               <div>
                 <dt>Updated</dt>
@@ -407,19 +417,27 @@
               <div class="panel-header">
                 <div>
                   <p class="vision-kicker">LIVE INFERENCE</p>
-                  <h2>Completed YOLO Inference Frames</h2>
+                  <h2>Image Topic Preview</h2>
                 </div>
-                <span id="vision-frame-meta" class="vision-frame-meta">Waiting for completed YOLO frame</span>
+                <span id="vision-frame-meta" class="vision-frame-meta">Waiting for image frame</span>
               </div>
-              <div class="vision-canvas-wrap">
-                <canvas id="vision-canvas" width="960" height="540"></canvas>
-                <div id="vision-feed-empty" class="vision-feed-empty">
-                  <strong>NO YOLO FRAME</strong>
-                  <span>/vision/yolo/annotated/compressed</span>
+              <div class="vision-frame-shell">
+                <div class="vision-frame-source">
+                  <label for="vision-frame-topic">
+                    <span>IMAGE TOPIC</span>
+                    <select id="vision-frame-topic" aria-label="Preview image topic">
+                      <option value="/vision/yolo/annotated/compressed">/vision/yolo/annotated/compressed</option>
+                    </select>
+                  </label>
+                  <span id="vision-frame-source-state" class="vision-frame-source-state">WAIT</span>
                 </div>
-              </div>
-              <div id="vision-detections" class="vision-detections">
-                <div class="vision-detection-empty">No YOLO detections</div>
+                <div class="vision-canvas-wrap">
+                  <canvas id="vision-canvas" width="960" height="540"></canvas>
+                  <div id="vision-feed-empty" class="vision-feed-empty">
+                    <strong id="vision-feed-empty-title">NO IMAGE FRAME</strong>
+                    <span id="vision-feed-empty-topic">/vision/yolo/annotated/compressed</span>
+                  </div>
+                </div>
               </div>
             </article>
 
@@ -453,91 +471,107 @@
                 <div><dt>Target area</dt><dd id="vision-area-value">--</dd></div>
               </dl>
               <div class="vision-rc-header">
-                <h2>Mission PWM Command · 18 Channels</h2>
-                <span id="vision-rc-meta">No output</span>
+                <h2>Mission PWM · 18 CH</h2>
+                <span id="vision-rc-meta" class="vision-rc-meta">No output</span>
               </div>
-              <div id="vision-rc-grid" class="vision-rc-grid"></div>
+              <div id="vision-rc-grid" class="vision-rc-grid" role="list" aria-label="Mission RC channel output"></div>
+              <div class="vision-rc-legend" aria-label="RC channel value legend">
+                <span><i class="pwm"></i>PWM active</span>
+                <span><i class="release"></i>REL release</span>
+                <span><i class="nochange"></i>N/C no change</span>
+              </div>
+              <section class="vision-object-section" aria-labelledby="vision-object-heading">
+                <h2 id="vision-object-heading">Detected Objects</h2>
+                <div id="vision-detections" class="vision-detections">
+                  <div class="vision-detection-empty">No YOLO detections</div>
+                </div>
+              </section>
             </article>
           </div>
 
           <article class="panel vision-config-panel">
-            <div class="panel-header">
-              <div>
-                <p class="vision-kicker">LAUNCH CONFIGURATION</p>
-                <h2>Detector and Mission Parameters</h2>
-              </div>
-              <span>Changes apply on next process start</span>
-            </div>
-            <div class="vision-config-grid">
-              <fieldset>
-                <legend>YOLO Detector</legend>
-                <label class="vision-field-wide"><span>Model path</span><input id="vision-model-path" data-vision-yolo="model_path" type="text" value="/home/pc/Downloads/best.pt" /></label>
-                <label><span>Device</span><select id="vision-device" data-vision-yolo="device"><option value="auto">Auto</option><option value="cuda:0">CUDA 0</option><option value="cpu">CPU</option></select></label>
-                <label><span>Confidence</span><input data-vision-yolo="confidence_threshold" type="number" min="0.01" max="1" step="0.01" value="0.35" /></label>
-                <label><span>Image size</span><input data-vision-yolo="imgsz" type="number" min="160" max="1920" step="32" value="640" /></label>
-                <label><span>Target class ID</span><input data-vision-yolo="target_class_id" type="number" min="-1" step="1" value="-1" /></label>
-                <label><span>Target class name</span><input data-vision-yolo="target_class_name" type="text" value="" placeholder="empty = all" /></label>
-                <label class="vision-field-wide"><span>Camera topic</span><input data-vision-yolo="image_topic" type="text" value="/camera/camera/color/image_raw/compressed" readonly /></label>
-                <label class="vision-field-wide"><span>BBox topic</span><input data-vision-yolo="bbox_topic" type="text" value="/vision/buoy_bbox" readonly /></label>
-                <label class="vision-field-wide"><span>Annotated image topic</span><input data-vision-yolo="annotated_image_topic" type="text" value="/vision/yolo/annotated/compressed" readonly /></label>
-                <label><span>JPEG quality</span><input data-vision-yolo="annotated_jpeg_quality" type="number" min="1" max="100" step="1" value="80" /></label>
-                <label class="vision-check"><input data-vision-yolo="publish_annotated_image" type="checkbox" checked /><span>Stream completed YOLO frames</span></label>
-                <label class="vision-check"><input data-vision-yolo="publish_per_class" type="checkbox" checked /><span>Publish best bbox for each class</span></label>
-                <div class="vision-process-actions vision-field-wide">
-                  <button id="vision-start-yolo" class="primary">Start YOLO</button>
-                  <button id="vision-stop-yolo">Stop YOLO</button>
+            <details class="vision-config-disclosure">
+              <summary>
+                <span class="vision-config-summary-label">Launch Configuration</span>
+                <span class="vision-config-chevron" aria-hidden="true"></span>
+              </summary>
+              <div class="vision-config-content">
+                <div class="panel-header">
+                  <h2>Detector and Mission Parameters</h2>
+                  <span>Changes apply on next process start</span>
                 </div>
-              </fieldset>
+                <div class="vision-config-grid">
+                  <fieldset>
+                    <legend>YOLO Detector</legend>
+                    <label class="vision-field-wide"><span>Model path</span><input id="vision-model-path" data-vision-yolo="model_path" type="text" value="/home/pc/Downloads/best.pt" /></label>
+                    <label><span>Device</span><select id="vision-device" data-vision-yolo="device"><option value="auto">Auto</option><option value="cuda:0">CUDA 0</option><option value="cpu">CPU</option></select></label>
+                    <label><span>Confidence</span><input data-vision-yolo="confidence_threshold" type="number" min="0.01" max="1" step="0.01" value="0.35" /></label>
+                    <label><span>Image size</span><input data-vision-yolo="imgsz" type="number" min="160" max="1920" step="32" value="640" /></label>
+                    <label><span>Target class ID</span><input data-vision-yolo="target_class_id" type="number" min="-1" step="1" value="-1" /></label>
+                    <label><span>Target class name</span><input data-vision-yolo="target_class_name" type="text" value="" placeholder="empty = all" /></label>
+                    <label class="vision-field-wide"><span>Camera topic</span><input data-vision-yolo="image_topic" type="text" value="/camera/camera/color/image_raw/compressed" readonly /></label>
+                    <label class="vision-field-wide"><span>BBox topic</span><input data-vision-yolo="bbox_topic" type="text" value="/vision/buoy_bbox" readonly /></label>
+                    <label class="vision-field-wide"><span>Annotated image topic</span><input data-vision-yolo="annotated_image_topic" type="text" value="/vision/yolo/annotated/compressed" readonly /></label>
+                    <label><span>JPEG quality</span><input data-vision-yolo="annotated_jpeg_quality" type="number" min="1" max="100" step="1" value="80" /></label>
+                    <label class="vision-check"><input data-vision-yolo="publish_annotated_image" type="checkbox" checked /><span>Stream completed YOLO frames</span></label>
+                    <label class="vision-check"><input data-vision-yolo="publish_per_class" type="checkbox" checked /><span>Publish best bbox for each class</span></label>
+                    <div class="vision-process-actions vision-field-wide">
+                      <button id="vision-start-yolo" class="primary">Start YOLO</button>
+                      <button id="vision-stop-yolo">Stop YOLO</button>
+                    </div>
+                  </fieldset>
 
-              <fieldset>
-                <legend>Mission Controller</legend>
-                <label class="vision-field-wide"><span>BBox topic</span><input data-vision-mission="bbox_topic" type="text" value="/vision/buoy_bbox" readonly /></label>
-                <label class="vision-field-wide"><span>PWM monitor topic</span><input data-vision-mission="rc_monitor_topic" type="text" value="/mission/rc_command" readonly /></label>
-                <label class="vision-field-wide"><span>Depth pose topic</span><input data-vision-mission="depth_pose_topic" type="text" value="/depth/pose" readonly /></label>
-                <label><span>Depth pose scale</span><input data-vision-mission="depth_pose_scale" type="number" step="0.1" value="-1.0" /></label>
-                <label><span>Depth pose offset</span><input data-vision-mission="depth_pose_offset_m" type="number" step="0.1" value="0.0" /></label>
-                <label><span>Work depth (m)</span><input data-vision-mission="work_depth_m" type="number" step="0.1" value="9.5" /></label>
-                <label><span>Surface depth (m)</span><input data-vision-mission="surface_depth_m" type="number" step="0.1" value="0.4" /></label>
-                <label><span>Maximum depth (m)</span><input data-vision-mission="max_depth_m" type="number" step="0.1" value="10.5" /></label>
-                <label><span>Approach area</span><input data-vision-mission="approach_area_ratio" type="number" min="0" max="1" step="0.01" value="0.12" /></label>
-                <label><span>Buoy class ID</span><input id="vision-buoy-class" data-vision-mission="buoy_class_id" type="number" step="1" value="0" /></label>
-                <label><span>Stick class ID</span><input id="vision-stick-class" data-vision-mission="stick_class_id" type="number" step="1" value="1" /></label>
-                <label><span>Fork target X</span><input data-vision-mission="fork_target_x" type="number" min="0" max="1" step="0.01" value="0.5" /></label>
-                <label><span>Fork target Y</span><input data-vision-mission="fork_target_y" type="number" min="0" max="1" step="0.01" value="0.5" /></label>
-                <label><span>Min PWM</span><input data-vision-mission="min_pwm" type="number" min="1300" max="1700" step="1" value="1300" /></label>
-                <label><span>Neutral PWM</span><input data-vision-mission="neutral_pwm" type="number" min="1300" max="1700" step="1" value="1500" /></label>
-                <label><span>Max PWM</span><input data-vision-mission="max_pwm" type="number" min="1300" max="1700" step="1" value="1700" /></label>
-                <label><span>Max yaw delta</span><input data-vision-mission="max_yaw_delta" type="number" min="0" max="400" step="1" value="180" /></label>
-                <label><span>Approach PWM</span><input data-vision-mission="forward_pwm" type="number" min="1300" max="1700" step="1" value="1560" /></label>
-                <label><span>Insert PWM</span><input data-vision-mission="insert_pwm" type="number" min="1300" max="1700" step="1" value="1560" /></label>
-                <label><span>Detach PWM</span><input data-vision-mission="detach_pwm" type="number" min="1300" max="1700" step="1" value="1620" /></label>
-                <label><span>Backoff PWM</span><input data-vision-mission="backoff_pwm" type="number" min="1300" max="1700" step="1" value="1420" /></label>
-                <label class="vision-check"><input data-vision-mission="yaw_invert" type="checkbox" /><span>Invert yaw</span></label>
-                <label class="vision-check"><input data-vision-mission="vertical_positive_is_up" type="checkbox" checked /><span>Positive throttle is up</span></label>
-                <details class="vision-advanced vision-field-wide">
-                  <summary>Advanced mission timing and channel mapping</summary>
-                  <div class="vision-advanced-grid">
-                    <label><span>Control rate (Hz)</span><input data-vision-mission="control_rate_hz" type="number" min="1" max="100" step="1" value="20" /></label>
-                    <label><span>Search timeout (s)</span><input data-vision-mission="search_timeout_sec" type="number" min="0" step="0.1" value="20.0" /></label>
-                    <label><span>Area verify (s)</span><input data-vision-mission="area_verify_sec" type="number" min="0" step="0.1" value="12.0" /></label>
-                    <label><span>Align stable (s)</span><input data-vision-mission="align_stable_sec" type="number" min="0" step="0.1" value="0.7" /></label>
-                    <label><span>Stick deadband X</span><input data-vision-mission="stick_deadband_x" type="number" min="0" max="1" step="0.01" value="0.06" /></label>
-                    <label><span>Stick deadband Y</span><input data-vision-mission="stick_deadband_y" type="number" min="0" max="1" step="0.01" value="0.08" /></label>
-                    <label><span>Insert duration (s)</span><input data-vision-mission="insert_duration_sec" type="number" min="0" step="0.1" value="0.8" /></label>
-                    <label><span>Detach duration (s)</span><input data-vision-mission="detach_duration_sec" type="number" min="0" step="0.1" value="0.3" /></label>
-                    <label><span>Backoff duration (s)</span><input data-vision-mission="backoff_duration_sec" type="number" min="0" step="0.1" value="0.5" /></label>
-                    <label><span>Throttle channel</span><input data-vision-mission="throttle_channel" type="number" min="1" max="18" step="1" value="3" /></label>
-                    <label><span>Yaw channel</span><input data-vision-mission="yaw_channel" type="number" min="1" max="18" step="1" value="4" /></label>
-                    <label><span>Forward channel</span><input data-vision-mission="forward_channel" type="number" min="1" max="18" step="1" value="5" /></label>
-                  </div>
-                </details>
-                <div class="vision-process-actions vision-field-wide">
-                  <button id="vision-start-mission" class="primary">Start Mission Controller</button>
-                  <button id="vision-stop-mission">Stop Mission Controller</button>
+                  <fieldset>
+                    <legend>Mission Controller</legend>
+                    <label class="vision-field-wide"><span>BBox topic</span><input data-vision-mission="bbox_topic" type="text" value="/vision/buoy_bbox" readonly /></label>
+                    <label class="vision-field-wide"><span>PWM monitor topic</span><input data-vision-mission="rc_monitor_topic" type="text" value="/mission/rc_command" readonly /></label>
+                    <label class="vision-field-wide"><span>Depth pose topic</span><input data-vision-mission="depth_pose_topic" type="text" value="/depth/pose" readonly /></label>
+                    <label><span>Depth pose scale</span><input data-vision-mission="depth_pose_scale" type="number" step="0.1" value="-1.0" /></label>
+                    <label><span>Depth pose offset</span><input data-vision-mission="depth_pose_offset_m" type="number" step="0.1" value="0.0" /></label>
+                    <label><span>Work depth (m)</span><input data-vision-mission="work_depth_m" type="number" step="0.1" value="9.5" /></label>
+                    <label><span>Surface depth (m)</span><input data-vision-mission="surface_depth_m" type="number" step="0.1" value="0.4" /></label>
+                    <label><span>Maximum depth (m)</span><input data-vision-mission="max_depth_m" type="number" step="0.1" value="10.5" /></label>
+                    <label><span>Approach area</span><input data-vision-mission="approach_area_ratio" type="number" min="0" max="1" step="0.01" value="0.12" /></label>
+                    <label><span>Buoy class ID</span><input id="vision-buoy-class" data-vision-mission="buoy_class_id" type="number" step="1" value="0" /></label>
+                    <label><span>Stick class ID</span><input id="vision-stick-class" data-vision-mission="stick_class_id" type="number" step="1" value="1" /></label>
+                    <label><span>Fork target X</span><input data-vision-mission="fork_target_x" type="number" min="0" max="1" step="0.01" value="0.5" /></label>
+                    <label><span>Fork target Y</span><input data-vision-mission="fork_target_y" type="number" min="0" max="1" step="0.01" value="0.5" /></label>
+                    <label><span>Min PWM</span><input data-vision-mission="min_pwm" type="number" min="1300" max="1700" step="1" value="1300" /></label>
+                    <label><span>Neutral PWM</span><input data-vision-mission="neutral_pwm" type="number" min="1300" max="1700" step="1" value="1500" /></label>
+                    <label><span>Max PWM</span><input data-vision-mission="max_pwm" type="number" min="1300" max="1700" step="1" value="1700" /></label>
+                    <label><span>Max yaw delta</span><input data-vision-mission="max_yaw_delta" type="number" min="0" max="400" step="1" value="180" /></label>
+                    <label><span>Approach PWM</span><input data-vision-mission="forward_pwm" type="number" min="1300" max="1700" step="1" value="1560" /></label>
+                    <label><span>Insert PWM</span><input data-vision-mission="insert_pwm" type="number" min="1300" max="1700" step="1" value="1560" /></label>
+                    <label><span>Detach PWM</span><input data-vision-mission="detach_pwm" type="number" min="1300" max="1700" step="1" value="1620" /></label>
+                    <label><span>Backoff PWM</span><input data-vision-mission="backoff_pwm" type="number" min="1300" max="1700" step="1" value="1420" /></label>
+                    <label class="vision-check"><input data-vision-mission="yaw_invert" type="checkbox" /><span>Invert yaw</span></label>
+                    <label class="vision-check"><input data-vision-mission="vertical_positive_is_up" type="checkbox" checked /><span>Positive throttle is up</span></label>
+                    <details class="vision-advanced vision-field-wide">
+                      <summary>Advanced mission timing and channel mapping</summary>
+                      <div class="vision-advanced-grid">
+                        <label><span>Control rate (Hz)</span><input data-vision-mission="control_rate_hz" type="number" min="1" max="100" step="1" value="20" /></label>
+                        <label><span>Search timeout (s)</span><input data-vision-mission="search_timeout_sec" type="number" min="0" step="0.1" value="20.0" /></label>
+                        <label><span>Area verify (s)</span><input data-vision-mission="area_verify_sec" type="number" min="0" step="0.1" value="12.0" /></label>
+                        <label><span>Align stable (s)</span><input data-vision-mission="align_stable_sec" type="number" min="0" step="0.1" value="0.7" /></label>
+                        <label><span>Stick deadband X</span><input data-vision-mission="stick_deadband_x" type="number" min="0" max="1" step="0.01" value="0.06" /></label>
+                        <label><span>Stick deadband Y</span><input data-vision-mission="stick_deadband_y" type="number" min="0" max="1" step="0.01" value="0.08" /></label>
+                        <label><span>Insert duration (s)</span><input data-vision-mission="insert_duration_sec" type="number" min="0" step="0.1" value="0.8" /></label>
+                        <label><span>Detach duration (s)</span><input data-vision-mission="detach_duration_sec" type="number" min="0" step="0.1" value="0.3" /></label>
+                        <label><span>Backoff duration (s)</span><input data-vision-mission="backoff_duration_sec" type="number" min="0" step="0.1" value="0.5" /></label>
+                        <label><span>Throttle channel</span><input data-vision-mission="throttle_channel" type="number" min="1" max="18" step="1" value="3" /></label>
+                        <label><span>Yaw channel</span><input data-vision-mission="yaw_channel" type="number" min="1" max="18" step="1" value="4" /></label>
+                        <label><span>Forward channel</span><input data-vision-mission="forward_channel" type="number" min="1" max="18" step="1" value="5" /></label>
+                      </div>
+                    </details>
+                    <div class="vision-process-actions vision-field-wide">
+                      <button id="vision-start-mission" class="primary">Start Mission Controller</button>
+                      <button id="vision-stop-mission">Stop Mission Controller</button>
+                    </div>
+                  </fieldset>
                 </div>
-              </fieldset>
-            </div>
-            <pre id="vision-log-output" class="vision-log-output"></pre>
+                <pre id="vision-log-output" class="vision-log-output"></pre>
+              </div>
+            </details>
           </article>
         </div>
       </section>
@@ -659,6 +693,24 @@
             </dl>
           </article>
 
+          <article class="panel pinger-top-view-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Pinger Top View</h2>
+                <p class="panel-note">Red: pinger estimate. White: Dry Run request or Live RC output.</p>
+              </div>
+              <span id="pinger-top-view-status" class="pinger-top-view-status">Waiting for estimate</span>
+            </div>
+            <canvas
+              id="pinger-top-view"
+              class="pinger-top-view"
+              width="640"
+              height="420"
+              role="img"
+              aria-label="Top view of estimated pinger and robot movement directions"
+            ></canvas>
+          </article>
+
           <article class="panel pinger-log-panel">
             <h2>Pinger Homing Logs</h2>
             <pre id="pinger-log-output"></pre>
@@ -728,6 +780,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260715-integrated-v3"></script>
+    <script src="/static/app.js?v=20260717-detections-under-rc"></script>
   </body>
 </html>

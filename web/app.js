@@ -25,6 +25,10 @@ const state = {
     message: "Idle",
     steps: [],
   },
+  dvl: {
+    calibrationState: "idle",
+    commandSubscriberCount: 0,
+  },
   path: {
     points: [],
     pose: { x: 0, y: 0, yaw: 0 },
@@ -57,6 +61,14 @@ const state = {
     frameLoading: false,
     frameSequence: 0,
     frameImage: null,
+    frameWidth: 0,
+    frameHeight: 0,
+    frameTopic: "/vision/yolo/annotated/compressed",
+    frameType: "sensor_msgs/msg/CompressedImage",
+    frameSourceGeneration: 0,
+    frameSourceChanging: false,
+    frameTopicOptionsSignature: "",
+    imageTopics: [],
     detections: [],
     process: {},
     topics: {},
@@ -67,6 +79,7 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const BAG_SELECTION_KEY = "kmu26-auv-web-gui-bag-selection";
 const VISION_CONFIG_KEY = "kmu26-auv-web-gui-vision-config";
+const DEFAULT_VISION_FRAME_TOPIC = "/vision/yolo/annotated/compressed";
 
 function fmt(value, digits = 2) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "--";
@@ -371,6 +384,7 @@ function bindControls() {
       postJson("/api/dvl/command", payload).catch(showError);
     });
   });
+  $("dvl-calibrate").addEventListener("click", startDvlCalibration);
 
   document.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -405,6 +419,7 @@ function showTab(name) {
   }
   state.vision.visible = name === "vision";
   if (state.vision.visible) {
+    loadVisionImageTopics().catch(showThrottledVisionError);
     startVisionFrameLoop();
     renderVisionCanvas();
   } else {
@@ -450,10 +465,20 @@ function renderStatus(payload) {
   const joy = ros.joy || {};
   const webControl = ros.web_control || {};
   const dvlConfig = ros.dvl_config || {};
+  const dvlCalibration = ros.dvl_calibration || {};
   const dvlEvents = ros.dvl_events || [];
+  const graph = ros.graph || {};
   const vision = ros.vision || {};
 
-  setPill("stack-pill", process.stack_running, process.stack_running ? "STACK ON" : "STACK OFF");
+  const stackRunning = Boolean(process.stack_running);
+  const stackReady = Boolean(process.stack_ready ?? stackRunning);
+  setPillState(
+    "stack-pill",
+    stackReady ? "STACK ON" : stackRunning ? "STACK PARTIAL" : "STACK OFF",
+    stackReady ? "good" : stackRunning ? "warn" : "bad",
+  );
+  $("start-stack").disabled = stackRunning;
+  $("stop-stack").disabled = !stackRunning;
   const pingerAlive = Boolean(process.pinger_running && topics.pinger_homing?.alive);
   const pingerMode = ros.pinger_homing_status?.dry_run ? "DRY" : "LIVE";
   setPill(
@@ -482,7 +507,7 @@ function renderStatus(payload) {
   $("battery-temp").textContent = fmtUnit(battery.temperature, "C", 1);
   renderMavrosState(mavrosState, topics.mavros_state);
   renderJoyGamepad(joy, topics.joy);
-  renderDvl(dvlConfig, dvlEvents);
+  renderDvl(dvlConfig, dvlEvents, dvlCalibration, graph);
   renderTestState();
   renderBag(process);
   renderTopics(topics);
@@ -798,6 +823,146 @@ function renderPingerPreflight(result) {
   $("pinger-preflight-result").classList.toggle("warn", !result.ok);
 }
 
+function drawPingerArrow(ctx, centerX, centerY, vectorX, vectorY, color, label) {
+  const magnitude = Math.hypot(vectorX, vectorY);
+  if (!Number.isFinite(magnitude) || magnitude < 1.0e-4) return false;
+
+  const length = 122;
+  const endX = centerX + (vectorX / magnitude) * length;
+  const endY = centerY - (vectorY / magnitude) * length;
+  const angle = Math.atan2(endY - centerY, endX - centerX);
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(centerX, centerY);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+  ctx.translate(endX, endY);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.moveTo(14, 0);
+  ctx.lineTo(-10, 9);
+  ctx.lineTo(-10, -9);
+  ctx.closePath();
+  ctx.fill();
+  ctx.font = "700 12px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(label, 0, -18);
+  ctx.restore();
+  return true;
+}
+
+function renderPingerTopView(ros) {
+  const canvas = $("pinger-top-view");
+  const status = $("pinger-top-view-status");
+  const context = canvas.getContext("2d");
+  const pinger = ros.pinger_homing_status || {};
+  const pose = ros.pose || {};
+  const hydrophone = ros.hydrophone_direction || {};
+  const source = pinger.estimated_source_world;
+  const yaw = Number(pose.yaw);
+  const movementCommand = pinger.dry_run ? pinger.requested_command : pinger.command;
+  const forward = Number(movementCommand?.forward);
+  const lateral = Number(movementCommand?.lateral);
+  const width = Math.max(300, Math.round(canvas.clientWidth || 640));
+  const height = Math.max(250, Math.round(width * 0.66));
+  const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
+
+  if (canvas.width !== width * pixelRatio || canvas.height !== height * pixelRatio) {
+    canvas.width = width * pixelRatio;
+    canvas.height = height * pixelRatio;
+  }
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = "#0b1210";
+  context.fillRect(0, 0, width, height);
+
+  context.strokeStyle = "rgba(176, 201, 191, 0.15)";
+  context.lineWidth = 1;
+  for (let x = width / 2; x < width; x += 40) {
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.lineTo(x, height);
+    context.moveTo(width - x, 0);
+    context.lineTo(width - x, height);
+    context.stroke();
+  }
+  for (let y = height / 2; y < height; y += 40) {
+    context.beginPath();
+    context.moveTo(0, y);
+    context.lineTo(width, y);
+    context.moveTo(0, height - y);
+    context.lineTo(width, height - y);
+    context.stroke();
+  }
+
+  const centerX = width / 2;
+  const centerY = height / 2;
+  context.strokeStyle = "rgba(255, 255, 255, 0.34)";
+  context.beginPath();
+  context.moveTo(centerX, 14);
+  context.lineTo(centerX, height - 14);
+  context.moveTo(14, centerY);
+  context.lineTo(width - 14, centerY);
+  context.stroke();
+
+  const hasSource = Array.isArray(source) && source.length >= 2 &&
+    [source[0], source[1], pose.x, pose.y].every((value) => Number.isFinite(Number(value)));
+  const hasPhaseDirection = [hydrophone.x, hydrophone.y].every(
+    (value) => value !== null && value !== undefined && Number.isFinite(Number(value)),
+  );
+  const pingerVector = hasSource
+    ? [Number(source[0]) - Number(pose.x), Number(source[1]) - Number(pose.y)]
+    : [Number(hydrophone.x), Number(hydrophone.y)];
+  const redVisible = (hasSource || hasPhaseDirection) && drawPingerArrow(
+    context,
+    centerX,
+    centerY,
+    pingerVector[0],
+    pingerVector[1],
+    "#ff4a4a",
+    "PINGER",
+  );
+
+  const hasCommand = Number.isFinite(yaw) && Number.isFinite(forward) && Number.isFinite(lateral);
+  const whiteVisible = hasCommand && drawPingerArrow(
+    context,
+    centerX,
+    centerY,
+    forward * Math.cos(yaw) - lateral * Math.sin(yaw),
+    forward * Math.sin(yaw) + lateral * Math.cos(yaw),
+    "#f5f7fa",
+    "ROBOT",
+  );
+
+  context.fillStyle = "#91a79f";
+  context.beginPath();
+  context.arc(centerX, centerY, 12, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = "#08100d";
+  context.font = "700 11px sans-serif";
+  context.textAlign = "center";
+  context.fillText("AUV", centerX, centerY + 4);
+  context.fillStyle = "#b9c9c2";
+  context.font = "12px sans-serif";
+  context.textAlign = "left";
+  context.fillText("N", 12, 22);
+  context.fillText("E", width - 24, centerY - 8);
+  context.fillText("S", 12, height - 12);
+  context.fillText("W", 12, centerY - 8);
+
+  const estimateLabel = hasSource ? "Position estimate" : "Phase direction";
+  const movementLabel = pinger.dry_run ? "Requested movement" : "Applied RC command";
+  status.textContent = redVisible
+    ? (whiteVisible ? `${estimateLabel} and ${movementLabel}` : `${estimateLabel} live · RC neutral`)
+    : "Waiting for estimate";
+  status.classList.toggle("live", Boolean(redVisible));
+}
+
 function renderPinger(process, ros) {
   const pinger = ros.pinger_homing_status || {};
   const topics = ros.topics || {};
@@ -867,6 +1032,7 @@ function renderPinger(process, ros) {
         line.includes("rc_override_mux"),
     )
     .join("\n");
+  renderPingerTopView(ros);
 }
 
 function renderBag(process) {
@@ -1238,11 +1404,40 @@ async function stopLocalizationTest() {
 
 function renderTestState() {
   $("test-state").textContent = state.test.running ? "Running" : state.test.message;
-  $("test-start").disabled = state.test.running || state.test.stopping;
+  $("test-start").disabled =
+    state.test.running || state.test.stopping || state.dvl.calibrationState === "calibrating";
   $("test-stop").disabled = state.test.stopping;
 }
 
-function renderDvl(config, events) {
+async function startDvlCalibration() {
+  if (!window.confirm(
+    "Keep the DVL and vehicle completely still during gyro calibration. Continue?",
+  )) return;
+
+  const button = $("dvl-calibrate");
+  button.disabled = true;
+  renderDvlCalibration({
+    state: "calibrating",
+    message: "Sending calibrate_gyro; waiting for DVL ACK",
+  }, {
+    dvl_command_subscribers: Math.max(1, state.dvl.commandSubscriberCount),
+  });
+  try {
+    const payload = await postJson("/api/dvl/command", { command: "calibrate_gyro" });
+    renderStatus(payload);
+  } catch (error) {
+    renderDvlCalibration({
+      state: "failed",
+      message: error.message,
+      error_message: error.message,
+    }, {
+      dvl_command_subscribers: state.dvl.commandSubscriberCount,
+    });
+    showError(error);
+  }
+}
+
+function renderDvl(config, events, calibration, graph) {
   const hasConfig = Object.keys(config).length > 0;
   $("dvl-updated").textContent = config.updated_at || "--";
   $("dvl-range").textContent = config.range_mode || "--";
@@ -1260,7 +1455,9 @@ function renderDvl(config, events) {
   const last = events[events.length - 1];
   if (last) {
     const name = last.parameter_name ? `${last.command}.${last.parameter_name}` : last.command;
-    $("dvl-last").textContent = `${last.success ? "OK" : "FAIL"} ${name}`;
+    $("dvl-last").textContent = last.type === "sent"
+      ? `SENT ${name} · waiting for ACK`
+      : `${last.success ? "ACK OK" : "ACK FAIL"} ${name}`;
   } else {
     $("dvl-last").textContent = "--";
   }
@@ -1270,11 +1467,51 @@ function renderDvl(config, events) {
     .map((event) => {
       const name = event.parameter_name ? `${event.command}.${event.parameter_name}` : event.command;
       const value = event.parameter_value ? ` ${event.parameter_value}` : "";
-      const result = event.success ? "OK" : `FAIL ${event.error_message || ""}`.trim();
+      const result = event.type === "sent"
+        ? "SENT · waiting for ACK"
+        : event.success
+          ? "ACK OK"
+          : `ACK FAIL ${event.error_message || ""}`.trim();
       const label = event.type === "config" ? "config received" : event.type;
       return `${event.time} ${label} ${name}${value} ${result}`;
     })
     .join("\n");
+
+  renderDvlCalibration(calibration, graph);
+}
+
+function renderDvlCalibration(calibration = {}, graph = {}) {
+  const subscriberCount = Number(graph.dvl_command_subscribers || 0);
+  const calibrationState = calibration.state || "idle";
+  const displayState = subscriberCount <= 0 && calibrationState === "idle"
+    ? "unavailable"
+    : calibrationState;
+  const labels = {
+    idle: "READY",
+    unavailable: "DVL OFFLINE · start stack",
+    calibrating: "CALIBRATING… keep still",
+    completed: `COMPLETE · ACK ${calibration.completed_at || "received"}`,
+    failed: `FAILED · ${calibration.error_message || calibration.message || "DVL rejected command"}`,
+    timeout: "TIMEOUT · calibration result unknown",
+  };
+  const status = $("dvl-calibration-state");
+  status.textContent = labels[displayState] || String(calibration.message || displayState);
+  status.title = String(calibration.message || status.textContent);
+  status.classList.remove("idle", "unavailable", "calibrating", "completed", "failed", "timeout");
+  status.classList.add(displayState);
+
+  state.dvl.calibrationState = calibrationState;
+  state.dvl.commandSubscriberCount = subscriberCount;
+  const running = calibrationState === "calibrating";
+  const button = $("dvl-calibrate");
+  button.textContent = running ? "Calibrating…" : "Calibrate Gyro";
+  button.disabled = running || subscriberCount <= 0 || state.test.running;
+  button.title = subscriberCount <= 0
+    ? "Start the DVL robot stack before calibration"
+    : "Keep the vehicle completely still until the DVL ACK arrives";
+  document.querySelectorAll("[data-dvl-command]").forEach((item) => {
+    item.disabled = running || subscriberCount <= 0;
+  });
 }
 
 async function loadEkfConfig() {
@@ -1685,6 +1922,9 @@ function bindVisionControls() {
   $("vision-emergency-stop").addEventListener("click", () => {
     postJson("/api/vision/emergency_stop").catch(showError);
   });
+  $("vision-frame-topic").addEventListener("change", (event) => {
+    selectVisionFrameTopic(event.target.value).catch(showError);
+  });
   window.addEventListener("resize", renderVisionCanvas);
   renderVisionRcChannels([]);
 }
@@ -1760,6 +2000,113 @@ function loadVisionConfig() {
   });
 }
 
+async function loadVisionImageTopics() {
+  const payload = await getJson("/api/vision/image_topics");
+  syncVisionFrameSource(payload.topics || [], payload.selected || {});
+}
+
+function syncVisionFrameSource(imageTopics, selected) {
+  const topics = Array.isArray(imageTopics)
+    ? imageTopics.filter((item) => item && typeof item.topic === "string" && item.topic)
+    : [];
+  const selectedTopic = typeof selected.topic === "string" && selected.topic
+    ? selected.topic
+    : state.vision.frameTopic || DEFAULT_VISION_FRAME_TOPIC;
+  const selectedType = typeof selected.type === "string" ? selected.type : "";
+  if (!topics.some((item) => item.topic === selectedTopic)) {
+    topics.push({ topic: selectedTopic, type: selectedType, available: false });
+  }
+  topics.sort((left, right) => left.topic.localeCompare(right.topic));
+  state.vision.imageTopics = topics;
+  updateVisionFrameTopicOptions(
+    topics,
+    state.vision.frameSourceChanging ? state.vision.frameTopic : selectedTopic,
+  );
+
+  if (state.vision.frameSourceChanging) return;
+  if (selectedTopic !== state.vision.frameTopic) {
+    state.vision.frameSourceGeneration += 1;
+    state.vision.frameTopic = selectedTopic;
+    clearVisionFrame();
+  }
+  state.vision.frameType = selectedType;
+  $("vision-frame-topic").value = selectedTopic;
+}
+
+function updateVisionFrameTopicOptions(topics, selectedTopic) {
+  const signature = JSON.stringify(topics.map((item) => [
+    item.topic,
+    item.type || "",
+    item.available !== false,
+  ]));
+  const select = $("vision-frame-topic");
+  if (signature !== state.vision.frameTopicOptionsSignature) {
+    const fragment = document.createDocumentFragment();
+    topics.forEach((item) => {
+      const option = document.createElement("option");
+      const typeLabel = String(item.type || "Image").split("/").pop();
+      option.value = item.topic;
+      option.textContent = `${item.topic} · ${typeLabel}${item.available === false ? " · unavailable" : ""}`;
+      fragment.appendChild(option);
+    });
+    select.replaceChildren(fragment);
+    state.vision.frameTopicOptionsSignature = signature;
+  }
+  select.value = selectedTopic;
+}
+
+async function selectVisionFrameTopic(topic) {
+  const requestedTopic = String(topic || "").trim();
+  if (!requestedTopic || requestedTopic === state.vision.frameTopic) return;
+
+  const previous = {
+    topic: state.vision.frameTopic,
+    type: state.vision.frameType,
+  };
+  const requestedOption = state.vision.imageTopics.find(
+    (item) => item.topic === requestedTopic,
+  );
+  state.vision.frameSourceChanging = true;
+  state.vision.frameSourceGeneration += 1;
+  state.vision.frameTopic = requestedTopic;
+  state.vision.frameType = requestedOption?.type || "";
+  $("vision-frame-topic").disabled = true;
+  $("vision-frame-source-state").textContent = "SWITCH";
+  clearVisionFrame();
+
+  try {
+    const payload = await postJson("/api/vision/image_source", {
+      topic: requestedTopic,
+    });
+    const selected = payload.selected || {};
+    state.vision.frameTopic = selected.topic || requestedTopic;
+    state.vision.frameType = selected.type || requestedOption?.type || "";
+    $("vision-frame-topic").value = state.vision.frameTopic;
+  } catch (error) {
+    state.vision.frameSourceGeneration += 1;
+    state.vision.frameTopic = previous.topic;
+    state.vision.frameType = previous.type;
+    $("vision-frame-topic").value = previous.topic;
+    clearVisionFrame();
+    throw error;
+  } finally {
+    state.vision.frameSourceChanging = false;
+    $("vision-frame-topic").disabled = state.vision.imageTopics.length === 0;
+  }
+}
+
+function clearVisionFrame() {
+  if (state.vision.frameImage?.close) state.vision.frameImage.close();
+  state.vision.frameImage = null;
+  state.vision.frameWidth = 0;
+  state.vision.frameHeight = 0;
+  const canvas = $("vision-canvas");
+  canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+  $("vision-feed-empty").classList.remove("hidden");
+  $("vision-feed-empty-title").textContent = "NO IMAGE FRAME";
+  $("vision-feed-empty-topic").textContent = state.vision.frameTopic;
+}
+
 function startVisionFrameLoop() {
   if (state.vision.frameTimer) return;
   refreshVisionFrame().catch(showThrottledVisionError);
@@ -1777,6 +2124,8 @@ function stopVisionFrameLoop() {
 async function refreshVisionFrame() {
   if (state.vision.frameLoading || !state.vision.visible) return;
   state.vision.frameLoading = true;
+  const generation = state.vision.frameSourceGeneration;
+  const requestedTopic = state.vision.frameTopic;
   try {
     const response = await fetch(`/api/vision/frame?after=${state.vision.frameSequence}`, {
       cache: "no-store",
@@ -1784,11 +2133,25 @@ async function refreshVisionFrame() {
     if (response.status === 204) return;
     if (!response.ok) throw new Error(`vision frame failed: ${response.status}`);
     const sequence = Number(response.headers.get("X-Vision-Frame-Sequence") || 0);
+    const responseTopic = response.headers.get("X-Vision-Frame-Topic") || "";
+    if (responseTopic && responseTopic !== requestedTopic) return;
     const blob = await response.blob();
     const image = await decodeVisionImage(blob);
+    if (
+      generation !== state.vision.frameSourceGeneration
+      || requestedTopic !== state.vision.frameTopic
+      || (responseTopic && responseTopic !== state.vision.frameTopic)
+    ) {
+      if (image?.close) image.close();
+      return;
+    }
     if (state.vision.frameImage?.close) state.vision.frameImage.close();
     state.vision.frameImage = image;
-    state.vision.frameSequence = sequence;
+    state.vision.frameSequence = Number.isFinite(sequence)
+      ? Math.max(state.vision.frameSequence, sequence)
+      : state.vision.frameSequence;
+    state.vision.frameWidth = image.width || image.naturalWidth || 0;
+    state.vision.frameHeight = image.height || image.naturalHeight || 0;
     $("vision-feed-empty").classList.add("hidden");
     renderVisionCanvas();
   } finally {
@@ -1814,8 +2177,12 @@ function renderVision(process, topics, vision, depth) {
   state.vision.topics = topics;
   state.vision.status = vision;
   state.vision.detections = vision.detections || [];
+  syncVisionFrameSource(vision.image_topics || [], {
+    topic: vision.frame_topic || DEFAULT_VISION_FRAME_TOPIC,
+    type: vision.frame_type || "",
+  });
 
-  const annotatedFeedAlive = Boolean(topics.vision_camera?.alive);
+  const frameFeedAlive = Boolean(topics.vision_camera?.alive);
   const bboxAlive = Boolean(topics.vision_bbox?.alive);
   const yoloRunning = Boolean(process.vision_yolo_running);
   const missionRunning = Boolean(process.vision_mission_running);
@@ -1825,8 +2192,8 @@ function renderVision(process, topics, vision, depth) {
 
   setPillState(
     "vision-camera-pill",
-    annotatedFeedAlive ? "YOLO FEED LIVE" : yoloRunning ? "YOLO FEED WAIT" : "YOLO FEED OFF",
-    annotatedFeedAlive ? "good" : "warn",
+    frameFeedAlive ? "IMAGE LIVE" : "IMAGE WAIT",
+    frameFeedAlive ? "good" : "warn",
   );
   setPillState(
     "vision-yolo-pill",
@@ -1877,12 +2244,36 @@ function renderVision(process, topics, vision, depth) {
   );
   $("vision-log-output").textContent = logs.slice(-80).join("\n") || "Vision process logs will appear here.";
 
-  const frameSize = vision.frame_width && vision.frame_height
-    ? `${vision.frame_width}x${vision.frame_height}`
+  const frameWidth = state.vision.frameWidth || vision.frame_width;
+  const frameHeight = state.vision.frameHeight || vision.frame_height;
+  const frameSize = frameWidth && frameHeight
+    ? `${frameWidth}x${frameHeight}`
     : "--";
-  $("vision-frame-meta").textContent = annotatedFeedAlive
+  const frameError = String(vision.frame_error || "");
+  $("vision-frame-meta").textContent = frameError
+    ? `Image error · ${frameError}`
+    : frameFeedAlive
     ? `${frameSize} · frame ${vision.frame_sequence || 0} · ${fmt(topics.vision_camera?.hz, 1)} Hz`
-    : "Waiting for completed YOLO frame";
+    : `Waiting for ${state.vision.frameTopic}`;
+  renderVisionFrameSourceState(frameFeedAlive, frameError, topics.vision_camera);
+}
+
+function renderVisionFrameSourceState(frameFeedAlive, frameError, topicHealth) {
+  const select = $("vision-frame-topic");
+  select.disabled = state.vision.frameSourceChanging || state.vision.imageTopics.length === 0;
+  if (!state.vision.frameSourceChanging) select.value = state.vision.frameTopic;
+
+  const sourceState = $("vision-frame-source-state");
+  sourceState.classList.toggle("live", frameFeedAlive && !frameError);
+  sourceState.classList.toggle("error", Boolean(frameError));
+  if (state.vision.frameSourceChanging) sourceState.textContent = "SWITCH";
+  else if (frameError) sourceState.textContent = "ERROR";
+  else if (frameFeedAlive) sourceState.textContent = `${fmt(topicHealth?.hz, 1)} HZ`;
+  else sourceState.textContent = "WAIT";
+
+  $("vision-feed-empty-topic").textContent = state.vision.frameTopic;
+  $("vision-feed-empty-title").textContent = frameError ? "IMAGE ERROR" : "NO IMAGE FRAME";
+  if (frameError) $("vision-feed-empty").classList.remove("hidden");
 }
 
 function topicAgeText(topic) {
@@ -1922,44 +2313,62 @@ function renderVisionDetections(detections, bboxAlive) {
 
 function renderVisionRcChannels(channels) {
   const configuredControls = [
-    { parameter: "throttle_channel", fallback: 3, label: "Vertical" },
-    { parameter: "yaw_channel", fallback: 4, label: "Yaw" },
-    { parameter: "forward_channel", fallback: 5, label: "Forward" },
+    { parameter: "throttle_channel", fallback: 3, label: "Vertical", shortLabel: "V" },
+    { parameter: "yaw_channel", fallback: 4, label: "Yaw", shortLabel: "Y" },
+    { parameter: "forward_channel", fallback: 5, label: "Forward", shortLabel: "F" },
   ];
-  const labelsByChannel = new Map(configuredControls.map((item) => {
+  const controlsByChannel = new Map(configuredControls.map((item) => {
     const input = document.querySelector(`[data-vision-mission="${item.parameter}"]`);
     const configuredChannel = Number(input?.value);
     const channel = Number.isInteger(configuredChannel) && configuredChannel >= 1 && configuredChannel <= 18
       ? configuredChannel
       : item.fallback;
-    return [channel, item.label];
+    return [channel, item];
   }));
   $("vision-rc-grid").innerHTML = Array.from({ length: 18 }, (_, index) => {
     const channel = index + 1;
-    const label = labelsByChannel.get(channel) || "RC Channel";
+    const control = controlsByChannel.get(channel);
     const receivedValue = channels[channel - 1];
-    const value = typeof receivedValue === "number" ? Math.round(receivedValue) : null;
-    const isPwm = value !== null && value !== 0 && value !== 65535;
-    let displayValue = value === null ? "--" : String(value);
-    let detail = "NO MESSAGE";
+    const value = Number.isFinite(receivedValue) ? Math.round(receivedValue) : null;
+    let statusClass = "empty";
+    let displayValue = "—";
+    let detail = "No message";
     if (value === 0) {
-      displayValue = "RELEASE";
-      detail = "RAW 0";
+      statusClass = "release";
+      displayValue = "REL";
+      detail = "Release, raw 0";
     } else if (value === 65535) {
-      displayValue = "NO COMMAND";
-      detail = "RAW 65535";
-    } else if (isPwm) detail = "PWM µs";
+      statusClass = "nochange";
+      displayValue = "N/C";
+      detail = "No change, raw 65535";
+    } else if (value !== null) {
+      statusClass = "pwm";
+      displayValue = String(value);
+      detail = `${value} microseconds`;
+    }
+    const controlLabel = control ? `${control.label} control` : "Unassigned";
     return `
-      <div class="vision-rc-channel ${isPwm ? "command" : "special"} ${labelsByChannel.has(channel) ? "controlled" : ""}">
-        <span>${label} · CH${channel}</span>
+      <div
+        class="vision-rc-channel ${statusClass} ${control ? "controlled" : ""}"
+        role="listitem"
+        title="Channel ${channel} · ${controlLabel} · ${detail}"
+        aria-label="Channel ${channel}, ${controlLabel}, ${detail}"
+      >
+        <span class="vision-rc-channel-heading">
+          <b>CH${String(channel).padStart(2, "0")}</b>
+          ${control ? `<em title="${control.label}">${control.shortLabel}</em>` : ""}
+        </span>
         <strong>${displayValue}</strong>
-        <small>${detail}</small>
       </div>
     `;
   }).join("");
-  $("vision-rc-meta").textContent = channels.length
+  const topicAlive = Boolean(state.vision.topics.vision_rc_command?.alive);
+  $("vision-rc-grid").classList.toggle("stale", channels.length > 0 && !topicAlive);
+  const meta = $("vision-rc-meta");
+  meta.textContent = channels.length
     ? topicAgeText(state.vision.topics.vision_rc_command)
     : "No output";
+  meta.classList.toggle("live", channels.length > 0 && topicAlive);
 }
 
 function renderVisionCanvas() {

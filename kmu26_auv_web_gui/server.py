@@ -375,12 +375,35 @@ def create_app(
         if command == "set_config" and not parameter_name:
             raise HTTPException(status_code=400, detail="set_config requires a parameter_name")
 
-        ros_interface.publish_dvl_command(command, parameter_name, parameter_value)
+        if command == "calibrate_gyro":
+            try:
+                ros_interface.start_dvl_gyro_calibration()
+            except RuntimeError as exc:
+                status_code = 409 if "already in progress" in str(exc) else 503
+                raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        else:
+            if ros_interface.dvl_command_subscriber_count() <= 0:
+                raise HTTPException(
+                    status_code=503,
+                    detail="DVL command subscriber is not available; start the DVL stack first",
+                )
+            try:
+                ros_interface.publish_dvl_command(command, parameter_name, parameter_value)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _status(process_manager, ros_interface)
 
     @app.post("/api/dvl/reset_dr")
     def reset_dvl() -> dict:
-        ros_interface.reset_dvl_dead_reckoning()
+        if ros_interface.dvl_command_subscriber_count() <= 0:
+            raise HTTPException(
+                status_code=503,
+                detail="DVL command subscriber is not available; start the DVL stack first",
+            )
+        try:
+            ros_interface.reset_dvl_dead_reckoning()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _status(process_manager, ros_interface)
 
     @app.post("/api/path/clear")
@@ -541,9 +564,34 @@ def create_app(
         process_manager.stop_vision()
         return _status(process_manager, ros_interface)
 
+    @app.get("/api/vision/image_topics")
+    def vision_image_topics() -> dict:
+        vision = ros_interface.status().get("vision", {})
+        return {
+            "topics": vision.get("image_topics", []),
+            "selected": {
+                "topic": vision.get("frame_topic", ""),
+                "type": vision.get("frame_type", ""),
+            },
+            "frame_sequence": int(vision.get("frame_sequence", 0) or 0),
+        }
+
+    @app.post("/api/vision/image_source")
+    async def select_vision_image_source(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        topic = str(body.get("topic", "")).strip()
+        try:
+            selected = await asyncio.to_thread(
+                ros_interface.select_vision_frame_topic,
+                topic,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"selected": selected}
+
     @app.get("/api/vision/frame")
     def vision_frame(after: int = 0) -> Response:
-        data, content_type, sequence = ros_interface.latest_vision_frame()
+        data, content_type, sequence, topic = ros_interface.latest_vision_frame()
         if not data or sequence <= after:
             return Response(status_code=204)
         return Response(
@@ -552,6 +600,7 @@ def create_app(
             headers={
                 "Cache-Control": "no-store, max-age=0",
                 "X-Vision-Frame-Sequence": str(sequence),
+                "X-Vision-Frame-Topic": topic,
             },
         )
 
@@ -913,8 +962,12 @@ def _run_localization_test(
 
     steps: list[dict[str, str]] = []
 
-    if process_manager.stack_running:
+    if process_manager.stack_ready:
         _append_test_step(steps, "stack", "skipped", "already running")
+    elif process_manager.stack_running:
+        raise RuntimeError(
+            "robot stack is only partially running; stop it before starting the test"
+        )
     else:
         process_manager.start_stack(launch_args)
         _append_test_step(steps, "stack", "ok", "started")

@@ -1,10 +1,17 @@
 from copy import deepcopy
 from html.parser import HTMLParser
 from pathlib import Path
+import time
 
 import rclpy
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
 
 from kmu26_auv_web_gui.ros_interface import LocalizationRosNode
+from kmu26_auv_web_gui.ros_interface import RosInterface
+from kmu26_auv_web_gui.ros_interface import COMPRESSED_IMAGE_TYPE
+from kmu26_auv_web_gui.ros_interface import RAW_IMAGE_TYPE
+from kmu26_auv_web_gui.ros_interface import _vision_image_topic_options
 from kmu26_auv_web_gui.server import _pinger_live_preflight
 
 
@@ -75,6 +82,137 @@ def test_vision_and_pinger_tabs_are_siblings_and_script_is_loaded_once() -> None
     assert len(parser.ids) == len(set(parser.ids))
 
 
+def test_vision_image_topic_selector_contract_is_complete() -> None:
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+    javascript = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+    frame_shell = html.index('<div class="vision-frame-shell">')
+    selector = html.index('id="vision-frame-topic"', frame_shell)
+    canvas_wrap = html.index('<div class="vision-canvas-wrap">', frame_shell)
+    canvas = html.index('id="vision-canvas"', canvas_wrap)
+    assert frame_shell < selector < canvas_wrap < canvas
+    assert 'id="vision-feed-empty-topic"' in html
+    assert html.count("?v=20260717-detections-under-rc") == 2
+    assert ".vision-frame-source" in css
+    assert "grid-template-columns: minmax(0, 7fr) minmax(320px, 3fr);" in css
+    assert css.count("{") == css.count("}")
+    assert 'getJson("/api/vision/image_topics")' in javascript
+    assert 'postJson("/api/vision/image_source"' in javascript
+    assert 'response.headers.get("X-Vision-Frame-Topic")' in javascript
+    assert "frameSourceGeneration" in javascript
+
+
+def test_vision_launch_configuration_is_collapsed_by_default() -> None:
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+
+    disclosure = '<details class="vision-config-disclosure">'
+    disclosure_start = html.index(disclosure)
+    summary = html.index("<summary>", disclosure_start)
+    content = html.index('<div class="vision-config-content">', summary)
+    assert "open" not in disclosure
+    assert disclosure_start < summary < content
+    assert 'class="vision-config-chevron" aria-hidden="true"' in html
+    assert ".vision-config-disclosure[open]" in css
+
+
+def test_vision_rc_channels_use_compact_status_grid() -> None:
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+    javascript = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'class="vision-rc-grid" role="list"' in html
+    assert 'class="vision-rc-legend"' in html
+    assert "grid-template-columns: repeat(6, minmax(0, 1fr));" in css
+    assert 'displayValue = "REL"' in javascript
+    assert 'displayValue = "N/C"' in javascript
+    assert 'shortLabel: "V"' in javascript
+    state_panel = html.index('<article class="panel vision-state-panel">')
+    rc_grid = html.index('id="vision-rc-grid"', state_panel)
+    detections = html.index('id="vision-detections"', rc_grid)
+    assert state_panel < rc_grid < detections
+
+
+def test_vision_image_topic_options_only_include_supported_types() -> None:
+    options = _vision_image_topic_options(
+        {
+            "/camera/raw": [RAW_IMAGE_TYPE],
+            "/camera/compressed": [COMPRESSED_IMAGE_TYPE],
+            "/camera/info": ["sensor_msgs/msg/CameraInfo"],
+        },
+        "/vision/yolo/annotated/compressed",
+        COMPRESSED_IMAGE_TYPE,
+    )
+
+    assert [item["topic"] for item in options] == [
+        "/camera/compressed",
+        "/camera/raw",
+        "/vision/yolo/annotated/compressed",
+    ]
+    assert options[-1]["available"] is False
+
+
+def test_vision_frame_source_switches_to_raw_image_topic() -> None:
+    owned_context = not rclpy.ok()
+    if owned_context:
+        rclpy.init(args=[])
+    node = LocalizationRosNode()
+    try:
+        node.create_publisher(
+            Image,
+            "/test/gui/raw_image",
+            qos_profile_sensor_data,
+        )
+        selected = node.select_vision_frame_topic("/test/gui/raw_image")
+        assert selected == {
+            "topic": "/test/gui/raw_image",
+            "type": RAW_IMAGE_TYPE,
+        }
+
+        msg = Image()
+        msg.height = 2
+        msg.width = 2
+        msg.encoding = "rgb8"
+        msg.step = 6
+        msg.data = bytes([255, 0, 0] * 4)
+        node._on_vision_raw_image(
+            msg,
+            selected["topic"],
+            node._vision_subscription_generation,
+        )
+
+        deadline = time.monotonic() + 2.0
+        frame = node.latest_vision_frame()
+        while not frame[0] and time.monotonic() < deadline:
+            time.sleep(0.01)
+            frame = node.latest_vision_frame()
+        data, content_type, sequence, topic = frame
+        assert data.startswith(b"\xff\xd8")
+        assert content_type == "image/jpeg"
+        assert sequence == 1
+        assert topic == selected["topic"]
+    finally:
+        node.destroy_node()
+        if owned_context and rclpy.ok():
+            rclpy.shutdown()
+
+
+def test_vision_frame_source_task_contains_selection_errors() -> None:
+    class InvalidSelectionNode:
+        @staticmethod
+        def select_vision_frame_topic(topic: str) -> dict:
+            raise ValueError(f"invalid image topic: {topic}")
+
+    result = RosInterface._select_vision_frame_topic_task(
+        InvalidSelectionNode(),
+        "/not/an/image",
+    )
+    assert result["selected"] == {}
+    assert result["invalid"] is True
+    assert result["error"] == "invalid image topic: /not/an/image"
+
+
 def test_pinger_parameter_controls_and_css_contract_are_complete() -> None:
     html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
@@ -88,6 +226,34 @@ def test_pinger_parameter_controls_and_css_contract_are_complete() -> None:
     assert ".pinger-parameter-groups" in css
     assert "function validatePingerParameters" in javascript
     assert "bindPingerParameterControls();" in javascript
+
+
+def test_pinger_top_view_contract_is_complete() -> None:
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+    javascript = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="pinger-top-view"' in html
+    assert 'id="pinger-top-view-status"' in html
+    assert ".pinger-top-view" in css
+    assert "function renderPingerTopView" in javascript
+    assert "pinger.dry_run ? pinger.requested_command : pinger.command" in javascript
+    assert "renderPingerTopView(ros);" in javascript
+
+
+def test_dvl_calibration_ui_waits_for_ack_contract() -> None:
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+    javascript = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="dvl-calibrate"' in html
+    assert 'id="dvl-calibration-state"' in html
+    assert 'aria-live="polite"' in html
+    assert "function startDvlCalibration" in javascript
+    assert "function renderDvlCalibration" in javascript
+    assert 'completed: `COMPLETE · ACK ${calibration.completed_at || "received"}`' in javascript
+    assert 'event.type === "sent"' in javascript
+    assert ".dvl-calibration-status.completed" in css
 
 
 def test_ros_bridge_keeps_pinger_subscription_separate_and_owns_no_final_rc() -> None:

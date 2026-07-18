@@ -3,9 +3,13 @@ import math
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+import cv2
+import numpy as np
 import rclpy
+from cv_bridge import CvBridge
 from dvl_msgs.msg import DVL
 from dvl_msgs.msg import CommandResponse
 from dvl_msgs.msg import ConfigCommand
@@ -28,6 +32,7 @@ from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import BatteryState
 from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import Image
 from sensor_msgs.msg import Imu
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool
@@ -43,9 +48,47 @@ DVL_MAX_FOM = 0.05
 DVL_MIN_ALTITUDE_M = 0.05
 DVL_MIN_VALID_BEAMS = 4
 DVL_TWIST_STALE_AFTER_S = 0.75
+DVL_CALIBRATION_TIMEOUT_S = 20.0
 ATTITUDE_MAX_TILT_DEG = 10.0
 STILLNESS_MAX_SPEED_MPS = 0.05
 READY_MODES = {"ALT_HOLD", "POSHOLD", "GUIDED"}
+DEFAULT_VISION_FRAME_TOPIC = "/vision/yolo/annotated/compressed"
+COMPRESSED_IMAGE_TYPE = "sensor_msgs/msg/CompressedImage"
+RAW_IMAGE_TYPE = "sensor_msgs/msg/Image"
+VISION_IMAGE_TYPES = (COMPRESSED_IMAGE_TYPE, RAW_IMAGE_TYPE)
+VISION_RAW_FRAME_MIN_INTERVAL_S = 0.1
+VISION_RAW_FRAME_JPEG_QUALITY = 80
+
+
+def _supported_image_type(topic_types: object) -> str:
+    types = topic_types if isinstance(topic_types, (list, tuple)) else []
+    return next((item for item in VISION_IMAGE_TYPES if item in types), "")
+
+
+def _vision_image_topic_options(
+    topic_names_and_types: dict[str, list[str]],
+    selected_topic: str,
+    selected_type: str,
+) -> list[dict]:
+    options = []
+    for topic in sorted(topic_names_and_types):
+        topic_type = _supported_image_type(topic_names_and_types[topic])
+        if topic_type:
+            options.append(
+                {"topic": topic, "type": topic_type, "available": True}
+            )
+    if selected_topic and not any(
+        item["topic"] == selected_topic for item in options
+    ):
+        options.append(
+            {
+                "topic": selected_topic,
+                "type": selected_type,
+                "available": False,
+            }
+        )
+        options.sort(key=lambda item: item["topic"])
+    return options
 
 
 def _yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
@@ -152,7 +195,7 @@ class LocalizationRosNode(Node):
             "joy": TopicHealth("/joy", stale_after=0.5),
             "battery": TopicHealth("/battery", stale_after=3.0),
             "vision_camera": TopicHealth(
-                "/vision/yolo/annotated/compressed", stale_after=1.5
+                DEFAULT_VISION_FRAME_TOPIC, stale_after=1.5
             ),
             "vision_bbox": TopicHealth("/vision/buoy_bbox", stale_after=1.0),
             "vision_mission_enable": TopicHealth(
@@ -215,6 +258,17 @@ class LocalizationRosNode(Node):
         }
         self._joy = {"axes": [], "buttons": []}
         self._dvl_config: dict = {}
+        self._dvl_calibration = {
+            "operation_id": 0,
+            "state": "idle",
+            "message": "Ready",
+            "success": None,
+            "error_message": "",
+            "started_at": "",
+            "completed_at": "",
+            "timeout_s": DVL_CALIBRATION_TIMEOUT_S,
+            "deadline_monotonic": None,
+        }
         self._pinger_homing_status = {
             "raw": "",
             "state": "",
@@ -258,6 +312,9 @@ class LocalizationRosNode(Node):
             "frame_stamp": 0.0,
             "frame_width": 0,
             "frame_height": 0,
+            "frame_topic": DEFAULT_VISION_FRAME_TOPIC,
+            "frame_type": COMPRESSED_IMAGE_TYPE,
+            "frame_error": "",
             "detections": {},
             "mission_enabled": False,
             "mission_state": "UNKNOWN",
@@ -265,8 +322,22 @@ class LocalizationRosNode(Node):
         }
         self._vision_frame_data = b""
         self._vision_frame_content_type = "image/jpeg"
+        self._vision_subscription_generation = 0
+        self._vision_raw_encode_pending = False
+        self._vision_last_raw_frame_at = 0.0
+        self._vision_frame_encoder = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="vision-frame-encoder",
+        )
+        self._cv_bridge = CvBridge()
+        self._vision_frame_subscription = None
 
         sensor_qos = qos_profile_sensor_data
+        command_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         state_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -276,7 +347,7 @@ class LocalizationRosNode(Node):
         self._dvl_config_pub = self.create_publisher(
             ConfigCommand,
             "/dvl/config/command",
-            sensor_qos,
+            command_qos,
         )
         self._web_joy_pub = self.create_publisher(Joy, "/joy", 10)
         self._vision_enable_pub = self.create_publisher(
@@ -288,8 +359,18 @@ class LocalizationRosNode(Node):
         self.create_subscription(Odometry, self._topic_config.odom, self._on_odom, sensor_qos)
         self.create_subscription(TwistWithCovarianceStamped, "/dvl/twist", self._on_dvl, sensor_qos)
         self.create_subscription(DVL, "/dvl/data", self._on_dvl_data, sensor_qos)
-        self.create_subscription(CommandResponse, "/dvl/command/response", self._on_dvl_response, sensor_qos)
-        self.create_subscription(ConfigStatus, "/dvl/config/status", self._on_dvl_config, sensor_qos)
+        self.create_subscription(
+            CommandResponse,
+            "/dvl/command/response",
+            self._on_dvl_response,
+            command_qos,
+        )
+        self.create_subscription(
+            ConfigStatus,
+            "/dvl/config/status",
+            self._on_dvl_config,
+            command_qos,
+        )
         self.create_subscription(
             PoseWithCovarianceStamped,
             self._topic_config.depth,
@@ -300,10 +381,10 @@ class LocalizationRosNode(Node):
         self.create_subscription(State, self._topic_config.mavros_state, self._on_mavros_state, 20)
         self.create_subscription(Imu, "/mavros/imu/data", self._on_imu, sensor_qos)
         self.create_subscription(Joy, "/joy", self._on_joy, 20)
-        self.create_subscription(
-            CompressedImage,
-            "/vision/yolo/annotated/compressed",
-            self._on_vision_image,
+        self._vision_frame_subscription = self._create_vision_frame_subscription(
+            DEFAULT_VISION_FRAME_TOPIC,
+            COMPRESSED_IMAGE_TYPE,
+            self._vision_subscription_generation,
             sensor_qos,
         )
         self.create_subscription(
@@ -350,6 +431,18 @@ class LocalizationRosNode(Node):
         parameter_name: str = "",
         parameter_value: str = "",
     ) -> None:
+        with self._lock:
+            self._expire_dvl_calibration_locked(time.monotonic())
+            if self._dvl_calibration["state"] == "calibrating":
+                raise RuntimeError("DVL gyro calibration is in progress")
+        self._publish_dvl_command(command, parameter_name, parameter_value)
+
+    def _publish_dvl_command(
+        self,
+        command: str,
+        parameter_name: str = "",
+        parameter_value: str = "",
+    ) -> None:
         msg = ConfigCommand()
         msg.command = command
         msg.parameter_name = parameter_name
@@ -360,9 +453,59 @@ class LocalizationRosNode(Node):
             command,
             parameter_name,
             parameter_value,
-            True,
+            None,
             "",
         )
+
+    def start_dvl_gyro_calibration(
+        self,
+        timeout_s: float = DVL_CALIBRATION_TIMEOUT_S,
+    ) -> dict:
+        subscriber_count = self._dvl_config_pub.get_subscription_count()
+        if subscriber_count <= 0:
+            message = "DVL command subscriber is not available; start the DVL stack first"
+            with self._lock:
+                self._set_dvl_calibration_result_locked(
+                    state="failed",
+                    success=False,
+                    error_message=message,
+                )
+            raise RuntimeError(message)
+
+        now = time.monotonic()
+        with self._lock:
+            self._expire_dvl_calibration_locked(now)
+            if self._dvl_calibration["state"] == "calibrating":
+                raise RuntimeError("DVL gyro calibration is already in progress")
+            operation_id = int(self._dvl_calibration["operation_id"]) + 1
+            self._dvl_calibration = {
+                "operation_id": operation_id,
+                "state": "calibrating",
+                "message": "Calibrating gyro; keep the vehicle completely still",
+                "success": None,
+                "error_message": "",
+                "started_at": time.strftime("%H:%M:%S"),
+                "completed_at": "",
+                "timeout_s": float(timeout_s),
+                "deadline_monotonic": now + float(timeout_s),
+            }
+
+        try:
+            self._publish_dvl_command("calibrate_gyro")
+        except Exception as exc:
+            with self._lock:
+                self._set_dvl_calibration_result_locked(
+                    state="failed",
+                    success=False,
+                    error_message=f"Failed to publish calibration command: {exc}",
+                )
+            raise
+        return self.dvl_calibration_status()
+
+    def dvl_calibration_status(self) -> dict:
+        with self._lock:
+            self._expire_dvl_calibration_locked(time.monotonic())
+            return self._dvl_calibration_snapshot_locked()
 
     def snapshot(self) -> dict:
         topic_names_and_types = dict(self.get_topic_names_and_types())
@@ -375,6 +518,7 @@ class LocalizationRosNode(Node):
             "rc_output_publisher_nodes": _endpoint_nodes(rc_output_publishers),
             "audio_publishers": len(audio_publishers),
             "audio_publisher_nodes": _endpoint_nodes(audio_publishers),
+            "dvl_command_subscribers": self._dvl_config_pub.get_subscription_count(),
             "topic_types": {
                 "odom": list(topic_names_and_types.get(self._topic_config.odom, [])),
                 "depth": list(topic_names_and_types.get(self._topic_config.depth, [])),
@@ -389,6 +533,12 @@ class LocalizationRosNode(Node):
             },
         }
         with self._lock:
+            vision_snapshot = self._vision_snapshot_locked()
+            vision_snapshot["image_topics"] = _vision_image_topic_options(
+                topic_names_and_types,
+                str(self._vision["frame_topic"]),
+                str(self._vision["frame_type"]),
+            )
             return {
                 "config": {
                     "topics": {
@@ -422,11 +572,12 @@ class LocalizationRosNode(Node):
                 },
                 "mavros_state": dict(self._mavros_state),
                 "dvl_config": dict(self._dvl_config),
+                "dvl_calibration": self._dvl_calibration_snapshot_locked(),
                 "dvl_events": list(self._dvl_events),
                 "path": list(self._path),
                 "path_count": len(self._path),
                 "web_control": self._web_control_snapshot(),
-                "vision": self._vision_snapshot_locked(),
+                "vision": vision_snapshot,
                 "pinger_homing_status": dict(self._pinger_homing_status),
                 "hydrophone_direction": dict(self._hydrophone_direction),
                 "delta_range_m": self._delta_range_m,
@@ -435,13 +586,65 @@ class LocalizationRosNode(Node):
                 "graph": graph,
             }
 
-    def latest_vision_frame(self) -> tuple[bytes, str, int]:
+    def latest_vision_frame(self) -> tuple[bytes, str, int, str]:
         with self._lock:
             return (
                 self._vision_frame_data,
                 self._vision_frame_content_type,
                 int(self._vision["frame_sequence"]),
+                str(self._vision["frame_topic"]),
             )
+
+    def select_vision_frame_topic(self, topic: str) -> dict:
+        requested_topic = str(topic).strip()
+        if not requested_topic:
+            raise ValueError("image topic is required")
+        topic_names_and_types = dict(self.get_topic_names_and_types())
+        topic_type = _supported_image_type(
+            topic_names_and_types.get(requested_topic, [])
+        )
+        if not topic_type:
+            raise ValueError(
+                f"topic is not an available Image or CompressedImage: {requested_topic}"
+            )
+
+        with self._lock:
+            current_topic = str(self._vision["frame_topic"])
+            current_type = str(self._vision["frame_type"])
+            generation = int(self._vision_subscription_generation)
+        if requested_topic == current_topic and topic_type == current_type:
+            return {"topic": current_topic, "type": current_type}
+
+        next_generation = generation + 1
+        new_subscription = self._create_vision_frame_subscription(
+            requested_topic,
+            topic_type,
+            next_generation,
+            qos_profile_sensor_data,
+        )
+        old_subscription = self._vision_frame_subscription
+        self._vision_frame_subscription = new_subscription
+        with self._lock:
+            self._vision_subscription_generation = next_generation
+            self._vision["frame_topic"] = requested_topic
+            self._vision["frame_type"] = topic_type
+            self._vision["frame_stamp"] = 0.0
+            self._vision["frame_width"] = 0
+            self._vision["frame_height"] = 0
+            self._vision["frame_error"] = ""
+            self._vision_frame_data = b""
+            self._vision_frame_content_type = "image/jpeg"
+            self._health["vision_camera"] = TopicHealth(
+                requested_topic,
+                stale_after=1.5,
+            )
+        if old_subscription is not None:
+            self.destroy_subscription(old_subscription)
+        return {"topic": requested_topic, "type": topic_type}
+
+    def destroy_node(self) -> bool:
+        self._vision_frame_encoder.shutdown(wait=True, cancel_futures=True)
+        return super().destroy_node()
 
     def set_vision_control_enabled(self, enabled: bool) -> None:
         msg = Bool()
@@ -782,6 +985,24 @@ class LocalizationRosNode(Node):
             msg.success,
             msg.error_message,
         )
+        if msg.response_to != "calibrate_gyro":
+            return
+        with self._lock:
+            self._expire_dvl_calibration_locked(time.monotonic())
+            if self._dvl_calibration["state"] != "calibrating":
+                return
+            if msg.success:
+                self._set_dvl_calibration_result_locked(
+                    state="completed",
+                    success=True,
+                    error_message="",
+                )
+            else:
+                self._set_dvl_calibration_result_locked(
+                    state="failed",
+                    success=False,
+                    error_message=msg.error_message or "DVL rejected gyro calibration",
+                )
 
     def _on_dvl_config(self, msg: ConfigStatus) -> None:
         with self._lock:
@@ -868,16 +1089,195 @@ class LocalizationRosNode(Node):
                 "buttons": list(msg.buttons),
             }
 
-    def _on_vision_image(self, msg: CompressedImage) -> None:
+    def _create_vision_frame_subscription(
+        self,
+        topic: str,
+        topic_type: str,
+        generation: int,
+        qos: QoSProfile,
+    ):
+        if topic_type == COMPRESSED_IMAGE_TYPE:
+            return self.create_subscription(
+                CompressedImage,
+                topic,
+                lambda msg: self._on_vision_compressed_image(
+                    msg,
+                    topic,
+                    generation,
+                ),
+                qos,
+            )
+        if topic_type == RAW_IMAGE_TYPE:
+            return self.create_subscription(
+                Image,
+                topic,
+                lambda msg: self._on_vision_raw_image(
+                    msg,
+                    topic,
+                    generation,
+                ),
+                qos,
+            )
+        raise ValueError(f"unsupported image topic type: {topic_type}")
+
+    def _on_vision_compressed_image(
+        self,
+        msg: CompressedImage,
+        topic: str,
+        generation: int,
+    ) -> None:
         image_format = str(msg.format or "jpeg").lower()
         content_type = "image/png" if "png" in image_format else "image/jpeg"
         stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        self._store_vision_frame(
+            topic=topic,
+            generation=generation,
+            data=bytes(msg.data),
+            content_type=content_type,
+            stamp=stamp,
+        )
+
+    def _on_vision_raw_image(
+        self,
+        msg: Image,
+        topic: str,
+        generation: int,
+    ) -> None:
+        now = time.monotonic()
         with self._lock:
+            if (
+                topic != self._vision["frame_topic"]
+                or generation != self._vision_subscription_generation
+                or self._vision_raw_encode_pending
+                or now - self._vision_last_raw_frame_at
+                < VISION_RAW_FRAME_MIN_INTERVAL_S
+            ):
+                return
+            self._vision_raw_encode_pending = True
+            self._vision_last_raw_frame_at = now
+        try:
+            self._vision_frame_encoder.submit(
+                self._encode_raw_vision_frame,
+                msg,
+                topic,
+                generation,
+            )
+        except Exception as exc:
+            with self._lock:
+                self._vision_raw_encode_pending = False
+                if generation == self._vision_subscription_generation:
+                    self._vision["frame_error"] = str(exc)[:240]
+
+    def _encode_raw_vision_frame(
+        self,
+        msg: Image,
+        topic: str,
+        generation: int,
+    ) -> None:
+        try:
+            image = self._cv_bridge.imgmsg_to_cv2(
+                msg,
+                desired_encoding="passthrough",
+            )
+            bgr_image = self._vision_image_to_bgr(image, str(msg.encoding))
+            encoded_ok, encoded = cv2.imencode(
+                ".jpg",
+                bgr_image,
+                [cv2.IMWRITE_JPEG_QUALITY, VISION_RAW_FRAME_JPEG_QUALITY],
+            )
+            if not encoded_ok:
+                raise RuntimeError("OpenCV could not encode the selected image")
+            stamp = (
+                float(msg.header.stamp.sec)
+                + float(msg.header.stamp.nanosec) * 1e-9
+            )
+            self._store_vision_frame(
+                topic=topic,
+                generation=generation,
+                data=encoded.tobytes(),
+                content_type="image/jpeg",
+                stamp=stamp,
+                width=int(msg.width),
+                height=int(msg.height),
+            )
+        except Exception as exc:
+            with self._lock:
+                if (
+                    topic == self._vision["frame_topic"]
+                    and generation == self._vision_subscription_generation
+                ):
+                    self._vision["frame_error"] = (
+                        f"{msg.encoding or 'unknown encoding'}: {exc}"
+                    )[:240]
+        finally:
+            with self._lock:
+                self._vision_raw_encode_pending = False
+
+    @staticmethod
+    def _vision_image_to_bgr(image: np.ndarray, encoding: str) -> np.ndarray:
+        array = np.asarray(image)
+        normalized_encoding = encoding.strip().lower()
+        if array.ndim == 2:
+            if array.dtype == np.uint8:
+                return cv2.cvtColor(array, cv2.COLOR_GRAY2BGR)
+            numeric = array.astype(np.float32, copy=False)
+            valid = np.isfinite(numeric)
+            if np.issubdtype(array.dtype, np.integer):
+                valid &= numeric > 0
+            scaled = np.zeros(array.shape, dtype=np.uint8)
+            if np.any(valid):
+                low, high = np.percentile(numeric[valid], (2.0, 98.0))
+                if high <= low:
+                    high = low + 1.0
+                scaled[valid] = np.clip(
+                    (numeric[valid] - low) * 255.0 / (high - low),
+                    0.0,
+                    255.0,
+                ).astype(np.uint8)
+            return cv2.applyColorMap(scaled, cv2.COLORMAP_TURBO)
+        if array.ndim == 3 and array.shape[2] == 3:
+            if normalized_encoding.startswith("rgb"):
+                return cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
+            return array
+        if array.ndim == 3 and array.shape[2] == 4:
+            conversion = (
+                cv2.COLOR_RGBA2BGR
+                if normalized_encoding.startswith("rgba")
+                else cv2.COLOR_BGRA2BGR
+            )
+            return cv2.cvtColor(array, conversion)
+        raise ValueError(
+            f"unsupported image shape {array.shape} for {encoding or 'unknown'}"
+        )
+
+    def _store_vision_frame(
+        self,
+        *,
+        topic: str,
+        generation: int,
+        data: bytes,
+        content_type: str,
+        stamp: float,
+        width: int = 0,
+        height: int = 0,
+    ) -> None:
+        if not data:
+            return
+        with self._lock:
+            if (
+                topic != self._vision["frame_topic"]
+                or generation != self._vision_subscription_generation
+            ):
+                return
             self._health["vision_camera"].tick()
-            self._vision_frame_data = bytes(msg.data)
+            self._vision_frame_data = data
             self._vision_frame_content_type = content_type
             self._vision["frame_sequence"] = int(self._vision["frame_sequence"]) + 1
             self._vision["frame_stamp"] = stamp
+            self._vision["frame_error"] = ""
+            if width > 0 and height > 0:
+                self._vision["frame_width"] = width
+                self._vision["frame_height"] = height
 
     def _on_vision_bbox(self, msg: Float32MultiArray) -> None:
         if len(msg.data) < 10:
@@ -904,8 +1304,9 @@ class LocalizationRosNode(Node):
             if abs(stamp - previous_stamp) > 1e-6:
                 self._vision["detections"] = {}
                 self._vision["detection_stamp"] = stamp
-            self._vision["frame_width"] = max(0, int(round(image_width)))
-            self._vision["frame_height"] = max(0, int(round(image_height)))
+            if self._vision["frame_topic"] == DEFAULT_VISION_FRAME_TOPIC:
+                self._vision["frame_width"] = max(0, int(round(image_width)))
+                self._vision["frame_height"] = max(0, int(round(image_height)))
             if detected >= 0.5 and image_width > 0.0 and image_height > 0.0:
                 class_key = str(int(round(class_id)))
                 self._vision["detections"][class_key] = {
@@ -952,6 +1353,9 @@ class LocalizationRosNode(Node):
             "frame_stamp": float(self._vision["frame_stamp"]),
             "frame_width": int(self._vision["frame_width"]),
             "frame_height": int(self._vision["frame_height"]),
+            "frame_topic": str(self._vision["frame_topic"]),
+            "frame_type": str(self._vision["frame_type"]),
+            "frame_error": str(self._vision["frame_error"]),
             "detections": detections,
             "mission_enabled": bool(self._vision["mission_enabled"]),
             "mission_state": str(self._vision["mission_state"]),
@@ -1064,7 +1468,7 @@ class LocalizationRosNode(Node):
         command: str,
         parameter_name: str,
         parameter_value: str,
-        success: bool,
+        success: bool | None,
         error_message: str,
     ) -> None:
         with self._lock:
@@ -1079,6 +1483,50 @@ class LocalizationRosNode(Node):
                     "error_message": error_message,
                 }
             )
+
+    def _expire_dvl_calibration_locked(self, now: float) -> None:
+        deadline = self._dvl_calibration.get("deadline_monotonic")
+        if (
+            self._dvl_calibration.get("state") == "calibrating"
+            and isinstance(deadline, (int, float))
+            and now >= float(deadline)
+        ):
+            self._set_dvl_calibration_result_locked(
+                state="timeout",
+                success=False,
+                error_message="No calibrate_gyro ACK received within the timeout",
+            )
+
+    def _set_dvl_calibration_result_locked(
+        self,
+        state: str,
+        success: bool,
+        error_message: str,
+    ) -> None:
+        if state == "completed":
+            message = "Calibration complete; DVL success ACK received"
+        elif state == "timeout":
+            message = "Calibration result unknown; DVL ACK timed out"
+        else:
+            message = error_message or "Gyro calibration failed"
+        self._dvl_calibration.update(
+            {
+                "state": state,
+                "message": message,
+                "success": success,
+                "error_message": error_message,
+                "completed_at": time.strftime("%H:%M:%S"),
+                "deadline_monotonic": None,
+            }
+        )
+
+    def _dvl_calibration_snapshot_locked(self) -> dict:
+        self._expire_dvl_calibration_locked(time.monotonic())
+        return {
+            key: value
+            for key, value in self._dvl_calibration.items()
+            if key != "deadline_monotonic"
+        }
 
     def _precheck_snapshot_locked(self) -> dict:
         dvl_ok, dvl = self._dvl_good_window_locked(2.0)
@@ -1275,6 +1723,14 @@ class RosInterface:
             raise RuntimeError("ROS interface is not running")
         self.node.publish_dvl_command(command, parameter_name, parameter_value)
 
+    def start_dvl_gyro_calibration(
+        self,
+        timeout_s: float = DVL_CALIBRATION_TIMEOUT_S,
+    ) -> dict:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.start_dvl_gyro_calibration(timeout_s)
+
     def reset_dvl_dead_reckoning(self) -> None:
         self.publish_dvl_command("reset_dead_reckoning")
 
@@ -1366,10 +1822,58 @@ class RosInterface:
             raise RuntimeError("ROS interface is not running")
         return self.node.set_mode(mode)
 
-    def latest_vision_frame(self) -> tuple[bytes, str, int]:
+    def latest_vision_frame(self) -> tuple[bytes, str, int, str]:
         if self.node is None:
-            return b"", "image/jpeg", 0
+            return b"", "image/jpeg", 0, DEFAULT_VISION_FRAME_TOPIC
         return self.node.latest_vision_frame()
+
+    def select_vision_frame_topic(
+        self,
+        topic: str,
+        timeout_s: float = 2.0,
+    ) -> dict:
+        with self._state_lock:
+            node = self.node
+            executor = self._executor
+        if node is None or executor is None:
+            raise RuntimeError("ROS interface is not running")
+        future = executor.create_task(
+            self._select_vision_frame_topic_task,
+            node,
+            topic,
+        )
+        deadline = time.monotonic() + timeout_s
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            raise RuntimeError("timed out while changing the image topic")
+        error = future.exception()
+        if error is not None:
+            raise error
+        result = future.result()
+        if result["error"]:
+            if result["invalid"]:
+                raise ValueError(result["error"])
+            raise RuntimeError(result["error"])
+        return result["selected"]
+
+    @staticmethod
+    def _select_vision_frame_topic_task(
+        node: LocalizationRosNode,
+        topic: str,
+    ) -> dict:
+        try:
+            return {
+                "selected": node.select_vision_frame_topic(topic),
+                "error": "",
+                "invalid": False,
+            }
+        except Exception as exc:
+            return {
+                "selected": {},
+                "error": str(exc),
+                "invalid": isinstance(exc, ValueError),
+            }
 
     def set_vision_control_enabled(self, enabled: bool) -> None:
         if self.node is None:
