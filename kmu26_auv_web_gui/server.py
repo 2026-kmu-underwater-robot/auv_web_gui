@@ -120,14 +120,20 @@ VISION_MISSION_LAUNCH_ARGS = {
     "max_pwm",
     "max_yaw_delta",
     "forward_pwm",
+    "approach_forward_min_pwm",
+    "search_yaw_pwm",
     "yaw_invert",
     "vertical_positive_is_up",
     "work_depth_m",
     "surface_depth_m",
     "max_depth_m",
+    "buoyancy_hold_delta_pwm",
+    "lpf_tau_sec",
     "buoy_class_id",
     "stick_class_id",
+    "min_detection_hits",
     "approach_area_ratio",
+    "approach_vision_throttle_weight",
     "fork_target_x",
     "fork_target_y",
     "stick_deadband_x",
@@ -510,7 +516,6 @@ def create_app(
             launch_args = _validated_launch_args(body, VISION_YOLO_LAUNCH_ARGS)
             if not launch_args.get("model_path"):
                 raise RuntimeError("model_path is required to start YOLO")
-            launch_args.setdefault("show_preview", "false")
             process_manager.start_vision_yolo(launch_args)
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1230,7 +1235,7 @@ def _analyze_and_write_bag(bag_path: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", default=8080, type=int)
+    parser.add_argument("--port", default=8081, type=int)
     parser.add_argument("--robot-package", default="hit25_auv_ros2")
     parser.add_argument("--robot-launch", default="localization_test.launch.py")
     parser.add_argument("--start-dronecan-allocator", default="true")

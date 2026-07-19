@@ -28,7 +28,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("host", default_value="0.0.0.0"),
-            DeclareLaunchArgument("port", default_value="8080"),
+            DeclareLaunchArgument("port", default_value="8081"),
             DeclareLaunchArgument("robot_package", default_value="hit25_auv_ros2"),
             DeclareLaunchArgument("robot_launch", default_value="localization_test.launch.py"),
             DeclareLaunchArgument("start_dronecan_allocator", default_value="true"),

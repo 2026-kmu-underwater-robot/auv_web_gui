@@ -13,6 +13,8 @@ from kmu26_auv_web_gui.ros_interface import COMPRESSED_IMAGE_TYPE
 from kmu26_auv_web_gui.ros_interface import RAW_IMAGE_TYPE
 from kmu26_auv_web_gui.ros_interface import _vision_image_topic_options
 from kmu26_auv_web_gui.server import _pinger_live_preflight
+from kmu26_auv_web_gui.server import VISION_MISSION_LAUNCH_ARGS
+from kmu26_auv_web_gui.server import VISION_YOLO_LAUNCH_ARGS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +44,9 @@ class _LayoutParser(HTMLParser):
         self.ids: list[str] = []
         self.app_scripts: list[str] = []
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
         values = dict(attrs)
         element_id = values.get("id") or ""
         if element_id:
@@ -72,6 +76,35 @@ class _LayoutParser(HTMLParser):
                 return
 
 
+class _VisionLaunchInputParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.arguments = {"yolo": set(), "mission": set()}
+        self.defaults = {"yolo": {}, "mission": {}}
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if tag not in {"input", "select"}:
+            return
+        values = dict(attrs)
+        for group in ("yolo", "mission"):
+            name = values.get(f"data-vision-{group}")
+            if not name:
+                continue
+            self.arguments[group].add(name)
+            if tag == "input":
+                is_checkbox = values.get("type") == "checkbox"
+                default = (
+                    "true"
+                    if is_checkbox and "checked" in values
+                    else values.get("value", "")
+                )
+                if is_checkbox and "checked" not in values:
+                    default = "false"
+                self.defaults[group][name] = default
+
+
 def test_vision_and_pinger_tabs_are_siblings_and_script_is_loaded_once() -> None:
     parser = _LayoutParser()
     parser.feed((ROOT / "web" / "index.html").read_text(encoding="utf-8"))
@@ -93,7 +126,7 @@ def test_vision_image_topic_selector_contract_is_complete() -> None:
     canvas = html.index('id="vision-canvas"', canvas_wrap)
     assert frame_shell < selector < canvas_wrap < canvas
     assert 'id="vision-feed-empty-topic"' in html
-    assert html.count("?v=20260717-detections-under-rc") == 2
+    assert html.count("?v=20260719-buoy-launch-sync") == 2
     assert ".vision-frame-source" in css
     assert "grid-template-columns: minmax(0, 7fr) minmax(320px, 3fr);" in css
     assert css.count("{") == css.count("}")
@@ -115,6 +148,61 @@ def test_vision_launch_configuration_is_collapsed_by_default() -> None:
     assert disclosure_start < summary < content
     assert 'class="vision-config-chevron" aria-hidden="true"' in html
     assert ".vision-config-disclosure[open]" in css
+
+
+def test_vision_launch_inputs_match_package_launch_contract() -> None:
+    parser = _VisionLaunchInputParser()
+    parser.feed((ROOT / "web" / "index.html").read_text(encoding="utf-8"))
+
+    assert parser.arguments["yolo"] == VISION_YOLO_LAUNCH_ARGS
+    assert parser.arguments["mission"] == VISION_MISSION_LAUNCH_ARGS
+    assert parser.defaults["mission"] == {
+        "bbox_topic": "/vision/buoy_bbox",
+        "depth_topic": "/auv/depth",
+        "depth_pose_topic": "/depth/pose",
+        "depth_pose_scale": "-1.0",
+        "depth_pose_offset_m": "0.0",
+        "enable_topic": "/mission/control_enable",
+        "state_topic": "/mission/state",
+        "rc_override_topic": "/mavros/rc/override",
+        "rc_monitor_topic": "/mission/rc_command",
+        "control_rate_hz": "20",
+        "throttle_channel": "3",
+        "yaw_channel": "4",
+        "forward_channel": "5",
+        "neutral_pwm": "1500",
+        "min_pwm": "1300",
+        "max_pwm": "1700",
+        "max_yaw_delta": "180",
+        "forward_pwm": "1700",
+        "approach_forward_min_pwm": "1560",
+        "search_yaw_pwm": "1600",
+        "yaw_invert": "false",
+        "vertical_positive_is_up": "true",
+        "work_depth_m": "0.4",
+        "surface_depth_m": "0.1",
+        "max_depth_m": "1.5",
+        "buoyancy_hold_delta_pwm": "40",
+        "lpf_tau_sec": "0.3",
+        "buoy_class_id": "0",
+        "stick_class_id": "1",
+        "min_detection_hits": "5",
+        "approach_area_ratio": "0.30",
+        "approach_vision_throttle_weight": "0.4",
+        "fork_target_x": "0.30",
+        "fork_target_y": "0.70",
+        "stick_deadband_x": "0.06",
+        "stick_deadband_y": "0.08",
+        "align_stable_sec": "0.7",
+        "insert_pwm": "1560",
+        "insert_duration_sec": "0.8",
+        "detach_pwm": "1620",
+        "detach_duration_sec": "0.3",
+        "backoff_pwm": "1420",
+        "backoff_duration_sec": "0.5",
+        "search_timeout_sec": "40.0",
+        "area_verify_sec": "12.0",
+    }
 
 
 def test_vision_rc_channels_use_compact_status_grid() -> None:

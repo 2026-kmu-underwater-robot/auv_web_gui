@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 HOST="${KMU26_WEB_GUI_HOST:-0.0.0.0}"
-PORT="${KMU26_WEB_GUI_PORT:-8080}"
+PORT="${KMU26_WEB_GUI_PORT:-8081}"
 PORT_EXPLICIT=0
 if [[ -n "${KMU26_WEB_GUI_PORT+x}" ]]; then
   PORT_EXPLICIT=1

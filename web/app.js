@@ -78,7 +78,7 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const BAG_SELECTION_KEY = "kmu26-auv-web-gui-bag-selection";
-const VISION_CONFIG_KEY = "kmu26-auv-web-gui-vision-config";
+const VISION_CONFIG_KEY = "kmu26-auv-web-gui-vision-config-v2";
 const DEFAULT_VISION_FRAME_TOPIC = "/vision/yolo/annotated/compressed";
 
 function fmt(value, digits = 2) {
