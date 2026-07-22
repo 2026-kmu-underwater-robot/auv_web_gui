@@ -162,7 +162,7 @@ def create_app(
     robot_package: str,
     robot_launch: str,
     start_dronecan_allocator: bool = True,
-    dronecan_can_interface: str = "can0",
+    dronecan_can_interface: str = "can1",
     dronecan_allocator_node_id: int = 126,
     dronecan_allocator_db: str = "",
     dronecan_python: str = "",
@@ -1239,7 +1239,7 @@ def main() -> None:
     parser.add_argument("--robot-package", default="auv")
     parser.add_argument("--robot-launch", default="localization_test.launch.py")
     parser.add_argument("--start-dronecan-allocator", default="true")
-    parser.add_argument("--dronecan-can-interface", default="can0")
+    parser.add_argument("--dronecan-can-interface", default="can1")
     parser.add_argument("--dronecan-allocator-node-id", default=126, type=int)
     parser.add_argument("--dronecan-allocator-db", default="")
     parser.add_argument("--dronecan-python", default="")

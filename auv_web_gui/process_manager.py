@@ -137,7 +137,7 @@ class ProcessManager:
         robot_package: str = "auv",
         robot_launch: str = "localization_test.launch.py",
         start_dronecan_allocator: bool = True,
-        dronecan_can_interface: str = "can0",
+        dronecan_can_interface: str = "can1",
         dronecan_allocator_node_id: int = 126,
         dronecan_allocator_db: str = "",
         dronecan_python: str = "",

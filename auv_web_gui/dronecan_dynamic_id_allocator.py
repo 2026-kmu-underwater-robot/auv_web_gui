@@ -55,7 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run a DroneCAN dynamic node ID allocator."
     )
-    parser.add_argument("--can-interface", default="can0")
+    parser.add_argument("--can-interface", default="can1")
     parser.add_argument("--node-id", default=127, type=int)
     parser.add_argument("--database-storage", default="")
     parser.add_argument("--spin-timeout", default=0.1, type=float)

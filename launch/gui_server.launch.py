@@ -32,7 +32,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("robot_package", default_value="auv"),
             DeclareLaunchArgument("robot_launch", default_value="localization_test.launch.py"),
             DeclareLaunchArgument("start_dronecan_allocator", default_value="true"),
-            DeclareLaunchArgument("dronecan_can_interface", default_value="can0"),
+            DeclareLaunchArgument("dronecan_can_interface", default_value="can1"),
             DeclareLaunchArgument("dronecan_allocator_node_id", default_value="126"),
             DeclareLaunchArgument("dronecan_allocator_db", default_value=""),
             DeclareLaunchArgument("dronecan_python", default_value=dronecan_python_default),
