@@ -10,10 +10,10 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from dvl_msgs.msg import DVL
-from dvl_msgs.msg import CommandResponse
-from dvl_msgs.msg import ConfigCommand
-from dvl_msgs.msg import ConfigStatus
+from auv_dvl_a50_msg.msg import DVL
+from auv_dvl_a50_msg.msg import CommandResponse
+from auv_dvl_a50_msg.msg import ConfigCommand
+from auv_dvl_a50_msg.msg import ConfigStatus
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import TwistWithCovarianceStamped
 from mavros_msgs.msg import OverrideRCIn
@@ -182,7 +182,7 @@ class TopicConfig:
 
 class LocalizationRosNode(Node):
     def __init__(self, topic_config: TopicConfig | None = None):
-        super().__init__("kmu26_auv_web_gui_bridge")
+        super().__init__("auv_web_gui_bridge")
         self._topic_config = topic_config or TopicConfig()
         self._lock = threading.Lock()
         self._health = {

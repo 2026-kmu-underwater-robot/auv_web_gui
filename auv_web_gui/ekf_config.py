@@ -61,7 +61,7 @@ def write_process_noise_covariance(values: list[float]) -> dict:
 
 
 def _installed_config_path() -> Path:
-    package_share = Path(get_package_share_directory("hit25_auv_ros2"))
+    package_share = Path(get_package_share_directory("auv"))
     return package_share / "config" / "auv_ekf.yaml"
 
 

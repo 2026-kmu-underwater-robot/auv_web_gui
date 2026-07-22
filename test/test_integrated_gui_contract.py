@@ -7,14 +7,14 @@ import rclpy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
-from kmu26_auv_web_gui.ros_interface import LocalizationRosNode
-from kmu26_auv_web_gui.ros_interface import RosInterface
-from kmu26_auv_web_gui.ros_interface import COMPRESSED_IMAGE_TYPE
-from kmu26_auv_web_gui.ros_interface import RAW_IMAGE_TYPE
-from kmu26_auv_web_gui.ros_interface import _vision_image_topic_options
-from kmu26_auv_web_gui.server import _pinger_live_preflight
-from kmu26_auv_web_gui.server import VISION_MISSION_LAUNCH_ARGS
-from kmu26_auv_web_gui.server import VISION_YOLO_LAUNCH_ARGS
+from auv_web_gui.ros_interface import LocalizationRosNode
+from auv_web_gui.ros_interface import RosInterface
+from auv_web_gui.ros_interface import COMPRESSED_IMAGE_TYPE
+from auv_web_gui.ros_interface import RAW_IMAGE_TYPE
+from auv_web_gui.ros_interface import _vision_image_topic_options
+from auv_web_gui.server import _pinger_live_preflight
+from auv_web_gui.server import VISION_MISSION_LAUNCH_ARGS
+from auv_web_gui.server import VISION_YOLO_LAUNCH_ARGS
 
 
 ROOT = Path(__file__).resolve().parents[1]

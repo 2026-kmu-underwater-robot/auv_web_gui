@@ -134,14 +134,14 @@ class ManagedProcess:
 class ProcessManager:
     def __init__(
         self,
-        robot_package: str = "hit25_auv_ros2",
+        robot_package: str = "auv",
         robot_launch: str = "localization_test.launch.py",
         start_dronecan_allocator: bool = True,
         dronecan_can_interface: str = "can0",
         dronecan_allocator_node_id: int = 126,
         dronecan_allocator_db: str = "",
         dronecan_python: str = "",
-        pinger_package: str = "kmu26_pinger_homing",
+        pinger_package: str = "auv_pinger_homing",
         pinger_launch: str = "pinger_homing_real.launch.py",
         realsense_package: str = "realsense2_camera",
         realsense_launch: str = "rs_launch.py",
@@ -181,7 +181,7 @@ class ProcessManager:
         cmd = [
             self.dronecan_python,
             "-m",
-            "kmu26_auv_web_gui.dronecan_dynamic_id_allocator",
+            "auv_web_gui.dronecan_dynamic_id_allocator",
             "--can-interface",
             self.dronecan_can_interface,
             "--node-id",
@@ -496,7 +496,7 @@ class ProcessManager:
     def _uses_external_dronecan_allocator(self) -> bool:
         if not self.dronecan_allocator_running:
             return False
-        if self.robot_package != "hit25_auv_ros2":
+        if self.robot_package != "auv":
             return False
         return self.robot_launch in {"localization_test.launch.py", "rov_start.launch.py"}
 

@@ -16,16 +16,16 @@ from fastapi import WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from kmu26_auv_web_gui.bag_analyzer import analyze_bag
-from kmu26_auv_web_gui.bag_analyzer import write_analysis_artifacts
-from kmu26_auv_web_gui.ekf_config import read_process_noise_covariance
-from kmu26_auv_web_gui.ekf_config import write_process_noise_covariance
-from kmu26_auv_web_gui.process_manager import ProcessManager
-from kmu26_auv_web_gui.ros_interface import ATTITUDE_MAX_TILT_DEG
-from kmu26_auv_web_gui.ros_interface import READY_MODES
-from kmu26_auv_web_gui.ros_interface import STILLNESS_MAX_SPEED_MPS
-from kmu26_auv_web_gui.ros_interface import TopicConfig
-from kmu26_auv_web_gui.ros_interface import RosInterface
+from auv_web_gui.bag_analyzer import analyze_bag
+from auv_web_gui.bag_analyzer import write_analysis_artifacts
+from auv_web_gui.ekf_config import read_process_noise_covariance
+from auv_web_gui.ekf_config import write_process_noise_covariance
+from auv_web_gui.process_manager import ProcessManager
+from auv_web_gui.ros_interface import ATTITUDE_MAX_TILT_DEG
+from auv_web_gui.ros_interface import READY_MODES
+from auv_web_gui.ros_interface import STILLNESS_MAX_SPEED_MPS
+from auv_web_gui.ros_interface import TopicConfig
+from auv_web_gui.ros_interface import RosInterface
 
 
 DEFAULT_BAG_TOPICS = [
@@ -166,7 +166,7 @@ def create_app(
     dronecan_allocator_node_id: int = 126,
     dronecan_allocator_db: str = "",
     dronecan_python: str = "",
-    pinger_package: str = "kmu26_pinger_homing",
+    pinger_package: str = "auv_pinger_homing",
     pinger_launch: str = "pinger_homing_real.launch.py",
     topic_config: TopicConfig | None = None,
 ) -> FastAPI:
@@ -191,7 +191,7 @@ def create_app(
     if web_dir_override:
         web_dir = Path(web_dir_override)
     else:
-        package_share = Path(get_package_share_directory("kmu26_auv_web_gui"))
+        package_share = Path(get_package_share_directory("auv_web_gui"))
         web_dir = package_share / "web"
 
     app.mount("/static", StaticFiles(directory=web_dir, follow_symlink=True), name="static")
@@ -1236,14 +1236,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", default=8081, type=int)
-    parser.add_argument("--robot-package", default="hit25_auv_ros2")
+    parser.add_argument("--robot-package", default="auv")
     parser.add_argument("--robot-launch", default="localization_test.launch.py")
     parser.add_argument("--start-dronecan-allocator", default="true")
     parser.add_argument("--dronecan-can-interface", default="can0")
     parser.add_argument("--dronecan-allocator-node-id", default=126, type=int)
     parser.add_argument("--dronecan-allocator-db", default="")
     parser.add_argument("--dronecan-python", default="")
-    parser.add_argument("--pinger-package", default="kmu26_pinger_homing")
+    parser.add_argument("--pinger-package", default="auv_pinger_homing")
     parser.add_argument("--pinger-launch", default="pinger_homing_real.launch.py")
     parser.add_argument(
         "--odom-topic",
