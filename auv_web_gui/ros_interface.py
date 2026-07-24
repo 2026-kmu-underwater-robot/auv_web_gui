@@ -9,11 +9,14 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 import rclpy
+from auv_msg.msg import AuvSetpoint
+from auv_msg.msg import MissionStatus
 from cv_bridge import CvBridge
 from auv_dvl_a50_msg.msg import DVL
 from auv_dvl_a50_msg.msg import CommandResponse
 from auv_dvl_a50_msg.msg import ConfigCommand
 from auv_dvl_a50_msg.msg import ConfigStatus
+from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import TwistWithCovarianceStamped
 from mavros_msgs.msg import OverrideRCIn
@@ -36,9 +39,11 @@ from sensor_msgs.msg import Image
 from sensor_msgs.msg import Imu
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool
+from std_msgs.msg import Empty
 from std_msgs.msg import Float32MultiArray
 from std_msgs.msg import Float64
 from std_msgs.msg import String
+from std_msgs.msg import UInt8
 
 
 PATH_MIN_DISTANCE_M = 0.01
@@ -95,6 +100,32 @@ def _yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _wrap_yaw(yaw: float) -> float:
+    return math.atan2(math.sin(yaw), math.cos(yaw))
+
+
+def _start_forward_pose(
+    x: float,
+    y: float,
+    yaw: float,
+    origin_x: float,
+    origin_y: float,
+    origin_yaw: float,
+) -> dict[str, float]:
+    """Convert odom pose to a display frame with start-forward pointing up."""
+    dx = x - origin_x
+    dy = y - origin_y
+    cosine = math.cos(origin_yaw)
+    sine = math.sin(origin_yaw)
+    return {
+        # Display +x is the vehicle's right side at initialization.
+        "x": sine * dx - cosine * dy,
+        # Display +y is the vehicle's forward direction at initialization.
+        "y": cosine * dx + sine * dy,
+        "yaw": _wrap_yaw(yaw - origin_yaw),
+    }
 
 
 def _rpy_from_quaternion(x: float, y: float, z: float, w: float) -> tuple[float, float, float]:
@@ -256,6 +287,16 @@ class LocalizationRosNode(Node):
             "system_status": None,
             "updated_at": "",
         }
+        self._guided = {
+            "status": "Waiting for guided_navigation",
+            "arrived": False,
+            "mission_status": MissionStatus.READY,
+            "mission_status_label": "READY",
+            "active_target": None,
+            "start_frame": None,
+            "last_command": None,
+            "updated_at": "",
+        }
         self._joy = {"axes": [], "buttons": []}
         self._dvl_config: dict = {}
         self._dvl_calibration = {
@@ -294,6 +335,16 @@ class LocalizationRosNode(Node):
         }
         self._dvl_events: deque[dict] = deque(maxlen=40)
         self._path: list[dict[str, float]] = []
+        self._path_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        self._path_frame = {
+            "aligned": False,
+            "origin_x": None,
+            "origin_y": None,
+            "origin_yaw": None,
+            "x_axis": "right",
+            "y_axis": "start_forward",
+        }
+        self._last_external_nav_reset_counter: int | None = None
         self._web_control = {
             "enabled": False,
             "active": False,
@@ -350,6 +401,18 @@ class LocalizationRosNode(Node):
             command_qos,
         )
         self._web_joy_pub = self.create_publisher(Joy, "/joy", 10)
+        self._guided_goal_pub = self.create_publisher(
+            AuvSetpoint, "/guided/goal", command_qos
+        )
+        self._guided_cancel_pub = self.create_publisher(
+            Empty, "/guided/cancel", command_qos
+        )
+        self._guided_waypoint_enable_pub = self.create_publisher(
+            Bool, "/guided/waypoint_enable", command_qos
+        )
+        self._guided_recapture_pub = self.create_publisher(
+            Empty, "/guided/recapture_start_frame", command_qos
+        )
         self._vision_enable_pub = self.create_publisher(
             Bool, "/mission/control_enable", 10
         )
@@ -380,6 +443,36 @@ class LocalizationRosNode(Node):
         self.create_subscription(BatteryState, "/battery", self._on_battery, sensor_qos)
         self.create_subscription(State, self._topic_config.mavros_state, self._on_mavros_state, 20)
         self.create_subscription(Imu, "/mavros/imu/data", self._on_imu, sensor_qos)
+        self.create_subscription(
+            UInt8,
+            "/mavros/odometry/reset_counter",
+            self._on_external_nav_reset,
+            state_qos,
+        )
+        self.create_subscription(
+            String, "/guided/status", self._on_guided_status, state_qos
+        )
+        self.create_subscription(
+            Bool, "/guided/arrived", self._on_guided_arrived, state_qos
+        )
+        self.create_subscription(
+            MissionStatus,
+            "/guided/mission_status",
+            self._on_guided_mission_status,
+            state_qos,
+        )
+        self.create_subscription(
+            PoseStamped,
+            "/guided/active_target",
+            self._on_guided_active_target,
+            state_qos,
+        )
+        self.create_subscription(
+            PoseStamped,
+            "/guided/start_frame",
+            self._on_guided_start_frame,
+            state_qos,
+        )
         self.create_subscription(Joy, "/joy", self._on_joy, 20)
         self._vision_frame_subscription = self._create_vision_frame_subscription(
             DEFAULT_VISION_FRAME_TOPIC,
@@ -519,6 +612,7 @@ class LocalizationRosNode(Node):
             "audio_publishers": len(audio_publishers),
             "audio_publisher_nodes": _endpoint_nodes(audio_publishers),
             "dvl_command_subscribers": self._dvl_config_pub.get_subscription_count(),
+            "guided_goal_subscribers": self._guided_goal_pub.get_subscription_count(),
             "topic_types": {
                 "odom": list(topic_names_and_types.get(self._topic_config.odom, [])),
                 "depth": list(topic_names_and_types.get(self._topic_config.depth, [])),
@@ -571,11 +665,17 @@ class LocalizationRosNode(Node):
                     "buttons": list(self._joy["buttons"]),
                 },
                 "mavros_state": dict(self._mavros_state),
+                "guided": {
+                    **self._guided,
+                    "available": self._guided_goal_pub.get_subscription_count() > 0,
+                },
                 "dvl_config": dict(self._dvl_config),
                 "dvl_calibration": self._dvl_calibration_snapshot_locked(),
                 "dvl_events": list(self._dvl_events),
                 "path": list(self._path),
                 "path_count": len(self._path),
+                "path_pose": dict(self._path_pose),
+                "path_frame": dict(self._path_frame),
                 "web_control": self._web_control_snapshot(),
                 "vision": vision_snapshot,
                 "pinger_homing_status": dict(self._pinger_homing_status),
@@ -659,6 +759,38 @@ class LocalizationRosNode(Node):
     def clear_path(self) -> None:
         with self._lock:
             self._path.clear()
+
+    def reset_path_frame(self, use_current_pose: bool = False) -> dict:
+        with self._lock:
+            self._path.clear()
+            odom_seen = self._health["odom"].last_seen
+            if use_current_pose and (
+                odom_seen is None or time.monotonic() - odom_seen > 2.0
+            ):
+                raise RuntimeError(
+                    "odometry is not fresh; cannot align the path view"
+                )
+            if use_current_pose:
+                pose = self._pose
+                self._set_path_frame_locked(
+                    float(pose["x"]),
+                    float(pose["y"]),
+                    float(pose["yaw"]),
+                )
+            else:
+                self._path_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+                self._path_frame.update(
+                    {
+                        "aligned": False,
+                        "origin_x": None,
+                        "origin_y": None,
+                        "origin_yaw": None,
+                    }
+                )
+            return {
+                "path_pose": dict(self._path_pose),
+                "path_frame": dict(self._path_frame),
+            }
 
     def dvl_command_subscriber_count(self) -> int:
         return self._dvl_config_pub.get_subscription_count()
@@ -793,6 +925,7 @@ class LocalizationRosNode(Node):
                 "yaw": pose["yaw"],
             }
             self._path.clear()
+            self._set_path_frame_locked(0.0, 0.0, float(pose["yaw"]))
         self.get_logger().info(
             "Set localization origin: "
             f"previous x={pose['x']:.3f} "
@@ -864,6 +997,67 @@ class LocalizationRosNode(Node):
         self._set_mode_client.call_async(request)
         return True
 
+    def publish_guided_goal(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        mode: int,
+    ) -> dict:
+        subscriber_count = self._guided_goal_pub.get_subscription_count()
+        if subscriber_count <= 0:
+            raise RuntimeError(
+                "guided_navigation is unavailable on /guided/goal"
+            )
+        msg = AuvSetpoint()
+        msg.x = float(x)
+        msg.y = float(y)
+        msg.z = float(z)
+        msg.yaw = 0.0
+        msg.mode = int(mode)
+        self._guided_goal_pub.publish(msg)
+
+        command = {
+            "x": msg.x,
+            "y": msg.y,
+            "z": msg.z,
+            "heading": "AUTO",
+            "mode": msg.mode,
+            "sent_at": time.strftime("%H:%M:%S"),
+        }
+        with self._lock:
+            self._guided["last_command"] = command
+        return {
+            "goal": command,
+            "subscriber_count": subscriber_count,
+        }
+
+    def cancel_guided_goal(self) -> int:
+        subscriber_count = self._guided_cancel_pub.get_subscription_count()
+        if subscriber_count <= 0:
+            raise RuntimeError(
+                "guided_navigation is unavailable on /guided/cancel"
+            )
+        self._guided_cancel_pub.publish(Empty())
+        return subscriber_count
+
+    def set_guided_waypoint_enabled(self, enabled: bool) -> int:
+        subscriber_count = self._guided_waypoint_enable_pub.get_subscription_count()
+        msg = Bool()
+        msg.data = bool(enabled)
+        self._guided_waypoint_enable_pub.publish(msg)
+        return subscriber_count
+
+    def recapture_guided_start_frame(self) -> int:
+        subscriber_count = self._guided_recapture_pub.get_subscription_count()
+        if subscriber_count <= 0:
+            raise RuntimeError(
+                "guided_navigation is unavailable on "
+                "/guided/recapture_start_frame"
+            )
+        self._guided_recapture_pub.publish(Empty())
+        return subscriber_count
+
     def _on_odom(self, msg: Odometry) -> None:
         pose = msg.pose.pose
         yaw = _yaw_from_quaternion(
@@ -884,7 +1078,54 @@ class LocalizationRosNode(Node):
                 "frame_id": msg.header.frame_id,
                 "child_frame_id": msg.child_frame_id,
             }
-            self._append_path_point(pose.position.x, pose.position.y)
+            if not bool(self._path_frame["aligned"]):
+                self._set_path_frame_locked(
+                    float(pose.position.x),
+                    float(pose.position.y),
+                    yaw,
+                )
+            display_pose = _start_forward_pose(
+                float(pose.position.x),
+                float(pose.position.y),
+                yaw,
+                float(self._path_frame["origin_x"]),
+                float(self._path_frame["origin_y"]),
+                float(self._path_frame["origin_yaw"]),
+            )
+            self._path_pose = display_pose
+            self._append_path_point(display_pose["x"], display_pose["y"])
+
+    def _on_external_nav_reset(self, msg: UInt8) -> None:
+        reset_counter = int(msg.data)
+        with self._lock:
+            if self._last_external_nav_reset_counter == reset_counter:
+                return
+            self._last_external_nav_reset_counter = reset_counter
+            self._path.clear()
+            self._path_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+            self._path_frame.update(
+                {
+                    "aligned": False,
+                    "origin_x": None,
+                    "origin_y": None,
+                    "origin_yaw": None,
+                }
+            )
+        self.get_logger().info(
+            "Path view will realign start-forward up after ExternalNav reset "
+            f"counter={reset_counter}"
+        )
+
+    def _set_path_frame_locked(self, x: float, y: float, yaw: float) -> None:
+        self._path_frame.update(
+            {
+                "aligned": True,
+                "origin_x": x,
+                "origin_y": y,
+                "origin_yaw": yaw,
+            }
+        )
+        self._path_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
 
     def _append_path_point(self, x: float, y: float) -> None:
         if not math.isfinite(x) or not math.isfinite(y):
@@ -1057,6 +1298,67 @@ class LocalizationRosNode(Node):
                 "system_status": int(msg.system_status),
                 "updated_at": time.strftime("%H:%M:%S"),
             }
+
+    def _on_guided_status(self, msg: String) -> None:
+        with self._lock:
+            self._guided["status"] = str(msg.data)
+            self._guided["updated_at"] = time.strftime("%H:%M:%S")
+
+    def _on_guided_arrived(self, msg: Bool) -> None:
+        with self._lock:
+            self._guided["arrived"] = bool(msg.data)
+            self._guided["updated_at"] = time.strftime("%H:%M:%S")
+
+    def _on_guided_mission_status(self, msg: MissionStatus) -> None:
+        labels = {
+            MissionStatus.READY: "READY",
+            MissionStatus.RUNNING: "RUNNING",
+            MissionStatus.COMPLETED: "COMPLETED",
+        }
+        with self._lock:
+            self._guided["mission_status"] = int(msg.status)
+            self._guided["mission_status_label"] = labels.get(
+                int(msg.status), f"UNKNOWN ({int(msg.status)})"
+            )
+            self._guided["updated_at"] = time.strftime("%H:%M:%S")
+
+    def _on_guided_active_target(self, msg: PoseStamped) -> None:
+        pose = msg.pose
+        yaw = _yaw_from_quaternion(
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        )
+        with self._lock:
+            self._guided["active_target"] = {
+                "frame_id": msg.header.frame_id,
+                "x": pose.position.x,
+                "y": pose.position.y,
+                "z": pose.position.z,
+                "yaw_rad": yaw,
+                "yaw_deg": math.degrees(yaw),
+            }
+            self._guided["updated_at"] = time.strftime("%H:%M:%S")
+
+    def _on_guided_start_frame(self, msg: PoseStamped) -> None:
+        pose = msg.pose
+        yaw = _yaw_from_quaternion(
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        )
+        with self._lock:
+            self._guided["start_frame"] = {
+                "frame_id": msg.header.frame_id,
+                "x": pose.position.x,
+                "y": pose.position.y,
+                "z": pose.position.z,
+                "yaw_rad": yaw,
+                "yaw_deg": math.degrees(yaw),
+            }
+            self._guided["updated_at"] = time.strftime("%H:%M:%S")
 
     def _on_imu(self, msg: Imu) -> None:
         orientation = msg.orientation
@@ -1739,6 +2041,11 @@ class RosInterface:
             raise RuntimeError("ROS interface is not running")
         self.node.clear_path()
 
+    def reset_path_frame(self, use_current_pose: bool = False) -> dict:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.reset_path_frame(use_current_pose)
+
     def dvl_command_subscriber_count(self) -> int:
         if self.node is None:
             raise RuntimeError("ROS interface is not running")
@@ -1821,6 +2128,32 @@ class RosInterface:
         if self.node is None:
             raise RuntimeError("ROS interface is not running")
         return self.node.set_mode(mode)
+
+    def publish_guided_goal(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        mode: int,
+    ) -> dict:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.publish_guided_goal(x, y, z, mode)
+
+    def cancel_guided_goal(self) -> int:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.cancel_guided_goal()
+
+    def set_guided_waypoint_enabled(self, enabled: bool) -> int:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.set_guided_waypoint_enabled(enabled)
+
+    def recapture_guided_start_frame(self) -> int:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.recapture_guided_start_frame()
 
     def latest_vision_frame(self) -> tuple[bytes, str, int, str]:
         if self.node is None:

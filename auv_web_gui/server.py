@@ -41,6 +41,14 @@ DEFAULT_BAG_TOPICS = [
     "/depth/pose",
     "/mavros/imu/data",
     "/mavros/state",
+    "/guided/goal",
+    "/guided/waypoint_enable",
+    "/waypoint",
+    "/guided/status",
+    "/guided/arrived",
+    "/guided/mission_status",
+    "/guided/active_target",
+    "/guided/start_frame",
     "/odometry/filtered",
     "/audio",
     "/audio_phase_estimator/delta_range_m",
@@ -230,6 +238,7 @@ def create_app(
         }
         launch_args.update({str(key): str(value) for key, value in requested_launch_args.items()})
         try:
+            ros_interface.reset_path_frame()
             process_manager.start_stack(launch_args)
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -417,6 +426,16 @@ def create_app(
         ros_interface.clear_path()
         return _status(process_manager, ros_interface)
 
+    @app.post("/api/path/align_forward")
+    def align_path_forward() -> dict:
+        try:
+            path_view = ros_interface.reset_path_frame(use_current_pose=True)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        payload = _status(process_manager, ros_interface)
+        payload["path_view"] = path_view
+        return payload
+
     @app.post("/api/localization/set_origin")
     def set_localization_origin() -> dict:
         previous_pose = ros_interface.status().get("pose", {})
@@ -505,8 +524,56 @@ def create_app(
         if mode not in ALLOWED_CONTROL_MODES:
             raise HTTPException(status_code=400, detail=f"unsupported mode: {mode}")
         accepted = ros_interface.set_mode(mode)
+        ros_interface.set_guided_waypoint_enabled(mode == "GUIDED")
+        if mode != "GUIDED":
+            try:
+                ros_interface.cancel_guided_goal()
+            except RuntimeError:
+                pass
         payload = _status(process_manager, ros_interface)
         payload["accepted"] = accepted
+        return payload
+
+    @app.post("/api/control/guided/goal")
+    async def publish_guided_goal(request: Request) -> dict:
+        body = await _json_or_empty(request)
+        x, y, z, mode = _guided_goal_values(body)
+        try:
+            ros_interface.set_guided_waypoint_enabled(False)
+            command = ros_interface.publish_guided_goal(
+                x=x,
+                y=y,
+                z=z,
+                mode=mode,
+            )
+            ros_interface.neutralize_web_control()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        payload = _status(process_manager, ros_interface)
+        payload["accepted"] = True
+        payload["guided_command"] = command
+        return payload
+
+    @app.post("/api/control/guided/cancel")
+    def cancel_guided_goal() -> dict:
+        try:
+            subscriber_count = ros_interface.cancel_guided_goal()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        payload = _status(process_manager, ros_interface)
+        payload["accepted"] = True
+        payload["subscriber_count"] = subscriber_count
+        return payload
+
+    @app.post("/api/control/guided/recapture")
+    def recapture_guided_start_frame() -> dict:
+        try:
+            subscriber_count = ros_interface.recapture_guided_start_frame()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        payload = _status(process_manager, ros_interface)
+        payload["accepted"] = True
+        payload["subscriber_count"] = subscriber_count
         return payload
 
     @app.post("/api/vision/yolo/start")
@@ -749,6 +816,37 @@ def _bounded_float(
     return value
 
 
+def _guided_goal_values(body: object) -> tuple[float, float, float, int]:
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+
+    values = {}
+    for key in ("x", "y", "z"):
+        try:
+            value = float(body.get(key, 0.0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"{key} must be numeric") from exc
+        if not math.isfinite(value):
+            raise HTTPException(status_code=400, detail=f"{key} must be finite")
+        values[key] = value
+
+    raw_mode = body.get("mode", 2)
+    if isinstance(raw_mode, bool):
+        raise HTTPException(status_code=400, detail="mode must be 0, 1, or 2")
+    try:
+        mode = int(raw_mode)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="mode must be 0, 1, or 2") from exc
+    if str(raw_mode).strip() not in {str(mode), f"{mode}.0"} or mode not in {0, 1, 2}:
+        raise HTTPException(status_code=400, detail="mode must be 0, 1, or 2")
+    return (
+        values["x"],
+        values["y"],
+        values["z"],
+        mode,
+    )
+
+
 def _pinger_live_preflight(ros_status: dict, body: dict) -> dict:
     topics = ros_status.get("topics", {}) if isinstance(ros_status, dict) else {}
     mavros = ros_status.get("mavros_state", {}) if isinstance(ros_status, dict) else {}
@@ -974,6 +1072,7 @@ def _run_localization_test(
             "robot stack is only partially running; stop it before starting the test"
         )
     else:
+        ros_interface.reset_path_frame()
         process_manager.start_stack(launch_args)
         _append_test_step(steps, "stack", "ok", "started")
         time.sleep(1.0)
